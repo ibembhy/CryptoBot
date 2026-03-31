@@ -48,6 +48,16 @@ class _FakeCoinbaseClient:
         )
 
 
+class _FakeSettlementEnricher:
+    def __init__(self, result: dict[str, object]) -> None:
+        self.result = result
+        self.calls = 0
+
+    def enrich(self) -> dict[str, object]:
+        self.calls += 1
+        return dict(self.result)
+
+
 class LivePaperTraderTests(unittest.TestCase):
     def _engine(self) -> BacktestEngine:
         gbm = GBMThresholdModel(drift=0.0, volatility_floor=0.05)
@@ -240,6 +250,69 @@ class LivePaperTraderTests(unittest.TestCase):
         result = asyncio.run(trader.run_once())
         self.assertEqual(result["positions_opened"], 1)
         self.assertEqual(result["opened"][0]["market_ticker"], "KXBTCD-STRONG")
+
+    def test_live_paper_trader_runs_periodic_settlement_enrichment_and_refreshes_calibrators(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "live_paper_enrich_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        ledger_path = base_dir / "live_paper_enrich_state.json"
+        if ledger_path.exists():
+            ledger_path.unlink()
+
+        observed_at = datetime(2026, 3, 31, 14, 0, tzinfo=timezone.utc)
+        snapshot = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-IDLE",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=observed_at,
+            expiry=observed_at + timedelta(minutes=20),
+            spot_price=65000.0,
+            threshold=65200.0,
+            direction="below",
+            yes_bid=0.50,
+            yes_ask=0.52,
+            no_bid=0.46,
+            no_ask=0.48,
+            volume=500.0,
+        )
+        settlement_enricher = _FakeSettlementEnricher({"markets_checked": 5, "markets_updated": 2})
+        refresh_calls: list[int] = []
+
+        def _refresh():
+            refresh_calls.append(1)
+            return {"gbm_threshold": 40}
+
+        trader = LivePaperTrader(
+            collector=_FakeCollector([[snapshot], [snapshot]]),
+            engine=self._engine(),
+            coinbase_client=_FakeCoinbaseClient(),
+            snapshot_store=SnapshotStore(db_path),
+            config=LivePaperConfig(
+                feature_history_hours=24,
+                poll_interval_seconds=30,
+                ledger_path=str(ledger_path),
+                feature_timeframe="1m",
+                volatility_window=20,
+                annualization_factor=105120.0,
+                settlement_check_interval_seconds=300,
+            ),
+            settlement_enricher=settlement_enricher,
+            calibrator_refresher=_refresh,
+        )
+
+        first = asyncio.run(trader.run_once())
+        self.assertEqual(settlement_enricher.calls, 1)
+        self.assertEqual(first["settlement_enrichment"]["markets_updated"], 2)
+        self.assertEqual(first["settlement_enrichment"]["calibrators_refreshed"], {"gbm_threshold": 40})
+        self.assertEqual(len(refresh_calls), 1)
+
+        second = asyncio.run(trader.run_once())
+        self.assertIsNone(second["settlement_enrichment"])
+        self.assertEqual(settlement_enricher.calls, 1)
 
 
 if __name__ == "__main__":

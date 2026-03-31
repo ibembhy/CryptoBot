@@ -5,9 +5,11 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from kalshi_btc_bot.backtest.fills import apply_entry_fill, apply_exit_fill
 from kalshi_btc_bot.backtest.engine import BacktestEngine
+from kalshi_btc_bot.collectors.settlements import SettlementEnricher
 from kalshi_btc_bot.collectors.hybrid import HybridCollector
 from kalshi_btc_bot.data.coinbase import CoinbaseClient, default_history_window
 from kalshi_btc_bot.data.features import build_feature_frame
@@ -27,6 +29,9 @@ class LivePaperConfig:
     feature_timeframe: str
     volatility_window: int
     annualization_factor: float
+    settlement_check_interval_seconds: int = 300
+    settlement_recent_hours: int = 72
+    settlement_max_markets_per_cycle: int = 100
 
 
 class LivePaperTrader:
@@ -38,6 +43,8 @@ class LivePaperTrader:
         coinbase_client: CoinbaseClient,
         snapshot_store: SnapshotStore,
         config: LivePaperConfig,
+        settlement_enricher: SettlementEnricher | None = None,
+        calibrator_refresher: Callable[[], dict[str, int]] | None = None,
     ) -> None:
         self.collector = collector
         self.engine = engine
@@ -50,9 +57,13 @@ class LivePaperTrader:
         self.risk_manager.initialize(self.engine.backtest_config.starting_bankroll)
         self.ledger_path = Path(self.config.ledger_path)
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settlement_enricher = settlement_enricher
+        self.calibrator_refresher = calibrator_refresher
+        self._last_settlement_enrichment_at: datetime | None = None
 
     async def run_once(self) -> dict[str, object]:
         snapshots = await self.collector.reconcile_once()
+        settlement_result = self._maybe_run_settlement_enrichment()
         feature_frame = self._build_feature_frame()
         opened: list[dict[str, object]] = []
         closed: list[dict[str, object]] = []
@@ -104,6 +115,7 @@ class LivePaperTrader:
             "closed": closed,
             "ledger_path": str(self.ledger_path),
             "state": state,
+            "settlement_enrichment": settlement_result,
         }
 
     async def run_forever(self) -> None:
@@ -123,6 +135,22 @@ class LivePaperTrader:
             volatility_window=self.config.volatility_window,
             annualization_factor=self.config.annualization_factor,
         )
+
+    def _maybe_run_settlement_enrichment(self) -> dict[str, object] | None:
+        if self.settlement_enricher is None:
+            return None
+        now = datetime.now(timezone.utc)
+        if self._last_settlement_enrichment_at is not None:
+            elapsed = (now - self._last_settlement_enrichment_at).total_seconds()
+            if elapsed < self.config.settlement_check_interval_seconds:
+                return None
+
+        self._last_settlement_enrichment_at = now
+        result = self.settlement_enricher.enrich()
+        if result.get("markets_updated", 0) > 0 and self.calibrator_refresher is not None:
+            refreshed = self.calibrator_refresher()
+            result = {**result, "calibrators_refreshed": refreshed}
+        return result
 
     def _maybe_open_position(self, snapshot: MarketSnapshot, feature_frame) -> dict[str, object] | None:
         if snapshot.settlement_price is not None or snapshot.observed_at >= snapshot.expiry:
