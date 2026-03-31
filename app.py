@@ -67,6 +67,64 @@ def build_latest_snapshot_table_cached(snapshots):
     return build_latest_snapshot_table(snapshots)
 
 
+def summarize_paper_state(paper_state: dict[str, object]) -> dict[str, object]:
+    closed_positions = paper_state.get("closed_positions", [])
+    realized_pnl = float(paper_state.get("realized_pnl", 0.0) or 0.0)
+    closed_count = len(closed_positions)
+    winning_closed = 0
+    for position in closed_positions:
+        pnl = float(position.get("realized_pnl", 0.0) or 0.0)
+        if pnl > 0:
+            winning_closed += 1
+    avg_pnl = realized_pnl / closed_count if closed_count else 0.0
+    win_rate = (winning_closed / closed_count * 100.0) if closed_count else 0.0
+    status = "Winning" if realized_pnl > 0 else "Losing" if realized_pnl < 0 else "Flat"
+    return {
+        "status": status,
+        "realized_pnl": realized_pnl,
+        "avg_pnl_per_trade": avg_pnl,
+        "win_rate": win_rate,
+        "open_positions": len(paper_state.get("open_positions", [])),
+        "closed_positions": closed_count,
+        "session_notional": float(paper_state.get("session_notional", 0.0) or 0.0),
+        "updated_at": paper_state.get("updated_at") or "-",
+    }
+
+
+def summarize_signal_table(signal_table) -> dict[str, object]:
+    if signal_table.empty:
+        return {
+            "candidate_count": 0,
+            "tradeable_count": 0,
+            "best_market_ticker": "-",
+            "best_side": "-",
+            "best_edge": 0.0,
+            "best_quality_score": 0.0,
+        }
+
+    candidate_count = len(signal_table)
+    tradeable = signal_table[signal_table["action"] != "no_action"] if "action" in signal_table.columns else signal_table
+    if tradeable.empty:
+        return {
+            "candidate_count": candidate_count,
+            "tradeable_count": 0,
+            "best_market_ticker": "-",
+            "best_side": "-",
+            "best_edge": 0.0,
+            "best_quality_score": 0.0,
+        }
+
+    best = tradeable.sort_values(by=["quality_score", "edge"], ascending=[False, False]).iloc[0]
+    return {
+        "candidate_count": candidate_count,
+        "tradeable_count": len(tradeable),
+        "best_market_ticker": best.get("market_ticker", "-"),
+        "best_side": best.get("side", "-") or "-",
+        "best_edge": float(best.get("edge", 0.0) or 0.0),
+        "best_quality_score": float(best.get("quality_score", 0.0) or 0.0),
+    }
+
+
 def main() -> None:
     settings, engine, store = load_runtime()
     sqlite_path = str(settings.collector["sqlite_path"])
@@ -154,6 +212,8 @@ def main() -> None:
         volatility_window=int(settings.data["volatility_window"]),
         annualization_factor=float(settings.data["annualization_factor"]),
     )
+    paper_summary = summarize_paper_state(paper_state)
+    signal_summary = summarize_signal_table(signal_table)
 
     metric_cols = st.columns(6)
     metric_cols[0].metric("Snapshots", summary["snapshot_count"])
@@ -172,12 +232,29 @@ def main() -> None:
     setup_cols[3].metric("Max Minutes To Expiry", settings.collector["max_minutes_to_expiry"])
 
     st.subheader("Paper Trading State")
-    paper_cols = st.columns(5)
-    paper_cols[0].metric("Realized PnL", paper_state.get("realized_pnl", 0.0))
-    paper_cols[1].metric("Session Notional", paper_state.get("session_notional", 0.0))
-    paper_cols[2].metric("Open Positions", len(paper_state.get("open_positions", [])))
-    paper_cols[3].metric("Closed Positions", len(paper_state.get("closed_positions", [])))
-    paper_cols[4].metric("Ledger Updated", paper_state.get("updated_at") or "-")
+    paper_cols = st.columns(6)
+    paper_cols[0].metric("Paper Status", paper_summary["status"])
+    paper_cols[1].metric("Realized PnL", round(float(paper_summary["realized_pnl"]), 2))
+    paper_cols[2].metric("Avg PnL / Closed Trade", round(float(paper_summary["avg_pnl_per_trade"]), 2))
+    paper_cols[3].metric("Win Rate", f'{paper_summary["win_rate"]:.1f}%')
+    paper_cols[4].metric("Open / Closed", f'{paper_summary["open_positions"]} / {paper_summary["closed_positions"]}')
+    paper_cols[5].metric("Ledger Updated", paper_summary["updated_at"])
+
+    extra_paper_cols = st.columns(3)
+    extra_paper_cols[0].metric("Session Notional", round(float(paper_summary["session_notional"]), 2))
+    extra_paper_cols[1].metric("Calibrators Active", len(engine.calibrators))
+    extra_paper_cols[2].metric("Recorded Fills", len(paper_state.get("fills", [])))
+
+    st.subheader("Signal Summary")
+    signal_cols = st.columns(5)
+    signal_cols[0].metric("Candidates", signal_summary["candidate_count"])
+    signal_cols[1].metric("Tradeable Now", signal_summary["tradeable_count"])
+    signal_cols[2].metric("Top Candidate", signal_summary["best_market_ticker"])
+    signal_cols[3].metric("Top Side", str(signal_summary["best_side"]).upper())
+    signal_cols[4].metric(
+        "Top Edge / Quality",
+        f'{signal_summary["best_edge"]:.4f} / {signal_summary["best_quality_score"]:.3f}',
+    )
 
     paper_left, paper_right = st.columns(2)
     with paper_left:

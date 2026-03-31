@@ -4,6 +4,7 @@ import unittest
 
 import pandas as pd
 
+from app import summarize_paper_state, summarize_signal_table
 from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine
 from kalshi_btc_bot.dashboard import (
     build_fills_table,
@@ -163,6 +164,60 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(fills_table.empty)
         self.assertIn("market_ticker", positions_table.columns)
         self.assertIn("timestamp", fills_table.columns)
+
+    def test_summarize_paper_state(self):
+        summary = summarize_paper_state(
+            {
+                "realized_pnl": 1.5,
+                "session_notional": 25.0,
+                "updated_at": "2026-03-31T16:00:00+00:00",
+                "open_positions": [{"position_id": "open-1"}],
+                "closed_positions": [
+                    {"position_id": "closed-1", "realized_pnl": 1.0},
+                    {"position_id": "closed-2", "realized_pnl": -0.5},
+                    {"position_id": "closed-3", "realized_pnl": 1.0},
+                ],
+            }
+        )
+        self.assertEqual(summary["status"], "Winning")
+        self.assertEqual(summary["open_positions"], 1)
+        self.assertEqual(summary["closed_positions"], 3)
+        self.assertAlmostEqual(summary["avg_pnl_per_trade"], 0.5)
+        self.assertAlmostEqual(summary["win_rate"], 66.6666666667, places=4)
+
+    def test_summarize_signal_table_uses_top_tradeable_candidate(self):
+        signal_table = pd.DataFrame(
+            [
+                {
+                    "market_ticker": "KXBTCD-A",
+                    "action": "no_action",
+                    "side": None,
+                    "edge": 0.9,
+                    "quality_score": 0.9,
+                },
+                {
+                    "market_ticker": "KXBTCD-B",
+                    "action": "buy_yes",
+                    "side": "yes",
+                    "edge": 0.2,
+                    "quality_score": 0.3,
+                },
+                {
+                    "market_ticker": "KXBTCD-C",
+                    "action": "buy_no",
+                    "side": "no",
+                    "edge": 0.4,
+                    "quality_score": 0.7,
+                },
+            ]
+        )
+        summary = summarize_signal_table(signal_table)
+        self.assertEqual(summary["candidate_count"], 3)
+        self.assertEqual(summary["tradeable_count"], 2)
+        self.assertEqual(summary["best_market_ticker"], "KXBTCD-C")
+        self.assertEqual(summary["best_side"], "no")
+        self.assertAlmostEqual(summary["best_edge"], 0.4)
+        self.assertAlmostEqual(summary["best_quality_score"], 0.7)
 
 
 if __name__ == "__main__":
