@@ -24,6 +24,7 @@ class PositionBook:
         entry_time: datetime,
         entry_price_cents: int,
         strategy_mode: str,
+        entry_fees_paid: float = 0.0,
     ) -> Position:
         self._counter += 1
         position = Position(
@@ -34,6 +35,7 @@ class PositionBook:
             entry_time=entry_time,
             entry_price_cents=entry_price_cents,
             strategy_mode=strategy_mode,
+            entry_fees_paid=entry_fees_paid,
         )
         self.positions[market_ticker] = position
         return position

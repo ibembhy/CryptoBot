@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kalshi_btc_bot.types import MarketSnapshot
+from kalshi_btc_bot.utils.time import ensure_utc
 
 
 class SnapshotStore:
@@ -336,8 +337,8 @@ class SnapshotStore:
             market_ticker=row["market_ticker"],
             contract_type=row["contract_type"],
             underlying_symbol=row["underlying_symbol"],
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-            expiry=datetime.fromisoformat(row["effective_expiry"] if "effective_expiry" in row.keys() and row["effective_expiry"] else row["expiry"]),
+            observed_at=ensure_utc(row["observed_at"]).to_pydatetime(),
+            expiry=ensure_utc(row["effective_expiry"] if "effective_expiry" in row.keys() and row["effective_expiry"] else row["expiry"]).to_pydatetime(),
             spot_price=float(row["spot_price"]),
             threshold=row["threshold"],
             range_low=row["range_low"],

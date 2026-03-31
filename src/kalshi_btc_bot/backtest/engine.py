@@ -216,11 +216,17 @@ class BacktestEngine:
             if signal.action == "no_action" or signal.entry_price_cents is None or signal.side is None:
                 continue
             entered = True
-            entry_fill_cents, entry_fee = apply_entry_fill(
+            entry_fill = apply_entry_fill(
                 signal.entry_price_cents,
                 self.backtest_config.entry_slippage_cents,
                 self.backtest_config.fee_rate_bps,
+                spread_cents=signal.spread_cents,
+                volume=snapshot.volume,
+                open_interest=snapshot.open_interest,
+                contracts=contracts,
             )
+            entry_fill_cents = entry_fill.price_cents
+            entry_fee = entry_fill.fees_paid
             entry_notional = round((entry_fill_cents * contracts) / 100.0 + entry_fee, 4)
             realized_so_far = sum(float(row["realized_pnl"]) for row in existing_rows + rows)
             current_equity = self.backtest_config.starting_bankroll + realized_so_far
@@ -320,12 +326,16 @@ class BacktestEngine:
                 as_of=snapshot.observed_at,
             )
             if decision.action == "exit" and decision.exit_price_cents is not None:
-                exit_fill, fee = apply_exit_fill(
+                exit_fill = apply_exit_fill(
                     decision.exit_price_cents,
                     self.backtest_config.exit_slippage_cents,
                     self.backtest_config.fee_rate_bps,
+                    spread_cents=self._spread_cents(snapshot, side),
+                    volume=snapshot.volume,
+                    open_interest=snapshot.open_interest,
+                    contracts=contracts,
                 )
-                return snapshot, exit_fill, fee, str(decision.trigger)
+                return snapshot, exit_fill.price_cents, exit_fill.fees_paid, str(decision.trigger)
 
         settlement_snapshot = snapshots[-1]
         settlement_price = self._settlement_price_cents(settlement_snapshot, side)
@@ -364,6 +374,16 @@ class BacktestEngine:
                 if side == "no" and snapshot.no_bid is not None:
                     return int(round(snapshot.no_bid * 100.0))
         return None
+
+    @staticmethod
+    def _spread_cents(snapshot: MarketSnapshot, side: str) -> int | None:
+        if side == "yes":
+            if snapshot.yes_ask is None or snapshot.yes_bid is None:
+                return None
+            return int(round(snapshot.yes_ask * 100.0)) - int(round(snapshot.yes_bid * 100.0))
+        if snapshot.no_ask is None or snapshot.no_bid is None:
+            return None
+        return int(round(snapshot.no_ask * 100.0)) - int(round(snapshot.no_bid * 100.0))
 
     @staticmethod
     def _lookup_recent_log_return(feature_frame: pd.DataFrame, observed_at) -> float:

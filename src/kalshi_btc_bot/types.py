@@ -92,6 +92,7 @@ class Position:
     entry_time: datetime
     entry_price_cents: int
     strategy_mode: str
+    entry_fees_paid: float = 0.0
     status: PositionStatus = "open"
     exit_time: datetime | None = None
     exit_price_cents: int | None = None

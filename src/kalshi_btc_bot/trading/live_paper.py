@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from kalshi_btc_bot.backtest.fills import apply_entry_fill, apply_exit_fill
 from kalshi_btc_bot.backtest.engine import BacktestEngine
 from kalshi_btc_bot.collectors.hybrid import HybridCollector
 from kalshi_btc_bot.data.coinbase import CoinbaseClient, default_history_window
@@ -117,7 +118,16 @@ class LivePaperTrader:
         if signal is None or estimate is None or signal.action == "no_action" or signal.side is None or signal.entry_price_cents is None:
             return None
         contracts = self.engine.backtest_config.default_contracts
-        entry_notional = round((signal.entry_price_cents * contracts) / 100.0, 4)
+        entry_fill = apply_entry_fill(
+            signal.entry_price_cents,
+            self.engine.backtest_config.entry_slippage_cents,
+            self.engine.backtest_config.fee_rate_bps,
+            spread_cents=signal.spread_cents,
+            volume=snapshot.volume,
+            open_interest=snapshot.open_interest,
+            contracts=contracts,
+        )
+        entry_notional = round((entry_fill.price_cents * contracts) / 100.0 + entry_fill.fees_paid, 4)
         current_equity = self.engine.backtest_config.starting_bankroll + self.risk_manager.realized_pnl
         risk_check = self.risk_manager.check_entry(
             entry_notional=entry_notional,
@@ -132,8 +142,9 @@ class LivePaperTrader:
             side=signal.side,
             contracts=contracts,
             entry_time=snapshot.observed_at,
-            entry_price_cents=signal.entry_price_cents,
+            entry_price_cents=entry_fill.price_cents,
             strategy_mode=self.engine.fusion_config.mode if self.engine.fusion_config else "single",
+            entry_fees_paid=entry_fill.fees_paid,
         )
         self.risk_manager.record_entry(entry_notional=entry_notional, expiry=snapshot.expiry)
         self.paper_broker.record_fill(
@@ -142,6 +153,7 @@ class LivePaperTrader:
             contracts=position.contracts,
             price_cents=position.entry_price_cents,
             timestamp=position.entry_time,
+            fees_paid=entry_fill.fees_paid,
         )
         return {
             "market_ticker": position.market_ticker,
@@ -157,7 +169,10 @@ class LivePaperTrader:
     def _maybe_close_position(self, position: Position, snapshot: MarketSnapshot, feature_frame) -> dict[str, object] | None:
         if snapshot.settlement_price is not None or snapshot.observed_at >= snapshot.expiry:
             exit_price_cents = self.engine._settlement_price_cents(snapshot, position.side)
-            realized_pnl = round(((exit_price_cents - position.entry_price_cents) * position.contracts) / 100.0, 2)
+            realized_pnl = round(
+                ((exit_price_cents - position.entry_price_cents) * position.contracts) / 100.0 - position.entry_fees_paid,
+                2,
+            )
             closed = self.position_book.close_position(
                 position.market_ticker,
                 exit_time=snapshot.observed_at,
@@ -176,6 +191,7 @@ class LivePaperTrader:
                 contracts=closed.contracts,
                 price_cents=exit_price_cents,
                 timestamp=snapshot.observed_at,
+                fees_paid=0.0,
             )
             return {
                 "market_ticker": closed.market_ticker,
@@ -193,11 +209,25 @@ class LivePaperTrader:
         )
         if decision is None or decision.action != "exit" or decision.exit_price_cents is None or decision.trigger is None:
             return None
-        realized_pnl = round(((decision.exit_price_cents - position.entry_price_cents) * position.contracts) / 100.0, 2)
+        exit_fill = apply_exit_fill(
+            decision.exit_price_cents,
+            self.engine.backtest_config.exit_slippage_cents,
+            self.engine.backtest_config.fee_rate_bps,
+            spread_cents=self.engine._spread_cents(snapshot, position.side),
+            volume=snapshot.volume,
+            open_interest=snapshot.open_interest,
+            contracts=position.contracts,
+        )
+        realized_pnl = round(
+            ((exit_fill.price_cents - position.entry_price_cents) * position.contracts) / 100.0
+            - position.entry_fees_paid
+            - exit_fill.fees_paid,
+            2,
+        )
         closed = self.position_book.close_position(
             position.market_ticker,
             exit_time=snapshot.observed_at,
-            exit_price_cents=decision.exit_price_cents,
+            exit_price_cents=exit_fill.price_cents,
             exit_trigger=decision.trigger,
             realized_pnl=realized_pnl,
         )
@@ -210,13 +240,14 @@ class LivePaperTrader:
             market_ticker=closed.market_ticker,
             side=f"sell_{closed.side}",
             contracts=closed.contracts,
-            price_cents=decision.exit_price_cents,
+            price_cents=exit_fill.price_cents,
             timestamp=snapshot.observed_at,
+            fees_paid=exit_fill.fees_paid,
         )
         return {
             "market_ticker": closed.market_ticker,
             "exit_trigger": decision.trigger,
-            "exit_price_cents": decision.exit_price_cents,
+            "exit_price_cents": exit_fill.price_cents,
             "realized_pnl": realized_pnl,
             "reason": decision.reason,
         }

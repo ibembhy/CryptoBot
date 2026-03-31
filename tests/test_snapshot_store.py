@@ -218,6 +218,35 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].expiry, datetime(2026, 3, 31, 15, 0, tzinfo=timezone.utc))
 
+    def test_load_snapshots_accepts_z_suffix_timestamps(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "snapshot_store_z_suffix_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        store = SnapshotStore(db_path)
+        snapshot = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-Z-SUFFIX",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 3, 31, 16, 0, tzinfo=timezone.utc),
+            expiry=datetime(2026, 4, 7, 21, 0, tzinfo=timezone.utc),
+            spot_price=68000,
+            threshold=69000,
+            direction="above",
+            metadata={
+                "close_time": "2026-03-31T17:00:00Z",
+                "expiration_time": "2026-04-07T21:00:00Z",
+            },
+        )
+        store.insert_snapshot(snapshot)
+        loaded = store.load_snapshots(series_ticker="KXBTCD")
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].observed_at, datetime(2026, 3, 31, 16, 0, tzinfo=timezone.utc))
+        self.assertEqual(loaded[0].expiry, datetime(2026, 3, 31, 17, 0, tzinfo=timezone.utc))
+
 
 if __name__ == "__main__":
     unittest.main()
