@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timezone
 
@@ -30,10 +31,15 @@ def load_runtime():
 
 def main() -> None:
     settings, engine, store = load_runtime()
+    query_params = st.query_params
     dashboard_username = os.getenv("KALSHI_BTC_DASHBOARD_USERNAME", "").strip()
     dashboard_password = os.getenv("KALSHI_BTC_DASHBOARD_PASSWORD", "").strip()
     if dashboard_username and dashboard_password:
-        authenticated = st.session_state.get("dashboard_authenticated", False)
+        auth_token = hashlib.sha256(f"{dashboard_username}:{dashboard_password}".encode("utf-8")).hexdigest()
+        authenticated = (
+            st.session_state.get("dashboard_authenticated", False)
+            or str(query_params.get("auth_token", "")) == auth_token
+        )
         if not authenticated:
             st.title("Kalshi BTC Bot Login")
             with st.form("dashboard_login"):
@@ -43,11 +49,12 @@ def main() -> None:
             if submitted:
                 if username == dashboard_username and password == dashboard_password:
                     st.session_state["dashboard_authenticated"] = True
+                    query_params["auth_token"] = auth_token
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
             return
-    query_params = st.query_params
+
     auto_refresh_default = str(query_params.get("auto_refresh", "false")).lower() == "true"
     try:
         refresh_seconds_default = int(query_params.get("refresh_seconds", "10"))
