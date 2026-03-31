@@ -25,6 +25,27 @@ class KalshiClient:
         cursor: str | None = None,
         session: requests.Session | None = None,
     ) -> list[dict]:
+        payload = self.list_markets_page(
+            series_ticker=series_ticker,
+            event_ticker=event_ticker,
+            status=status,
+            limit=limit,
+            cursor=cursor,
+            session=session,
+        )
+        markets = payload.get("markets", payload)
+        return list(markets)
+
+    def list_markets_page(
+        self,
+        *,
+        series_ticker: str = "KXBTCD",
+        event_ticker: str | None = None,
+        status: str = "open",
+        limit: int = 100,
+        cursor: str | None = None,
+        session: requests.Session | None = None,
+    ) -> dict[str, Any]:
         http = session or self._build_session()
         params: dict[str, Any] = {"status": status, "limit": limit}
         if series_ticker:
@@ -39,9 +60,7 @@ class KalshiClient:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        payload = response.json()
-        markets = payload.get("markets", payload)
-        return list(markets)
+        return response.json()
 
     def list_events(
         self,

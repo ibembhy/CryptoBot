@@ -56,12 +56,7 @@ class HybridCollector:
     async def bootstrap(self) -> list[MarketSnapshot]:
         observed_at = datetime.now(timezone.utc)
         spot = self._get_spot_price(observed_at)
-        raw_markets = self.kalshi_client.list_markets(
-            series_ticker=self.config.series_ticker,
-            status=self.config.status,
-            limit=self.config.market_limit,
-        )
-        raw_markets = self._filter_and_rank_markets(raw_markets, observed_at)
+        raw_markets = self._discover_markets(observed_at=observed_at, spot_price=spot)
         snapshots = [
             normalize_market(
                 raw,
@@ -108,6 +103,27 @@ class HybridCollector:
         )
         self.snapshot_store.insert_snapshot(snapshot)
         return snapshot
+
+    def _discover_markets(self, *, observed_at: datetime, spot_price: float) -> list[dict[str, Any]]:
+        raw_markets: list[dict[str, Any]] = []
+        cursor: str | None = None
+        max_pages = 10
+        target_pool_size = max(self.config.market_limit * 3, self.config.market_limit)
+        for _ in range(max_pages):
+            page = self.kalshi_client.list_markets_page(
+                series_ticker=self.config.series_ticker,
+                status=self.config.status,
+                limit=self.config.market_limit,
+                cursor=cursor,
+            )
+            page_markets = list(page.get("markets", []))
+            if not page_markets:
+                break
+            raw_markets.extend(page_markets)
+            cursor = page.get("cursor")
+            if len(raw_markets) >= target_pool_size or not cursor:
+                break
+        return self._filter_and_rank_markets(raw_markets, observed_at, spot_price)
 
     async def _reconcile_loop(self) -> None:
         while True:
@@ -163,8 +179,8 @@ class HybridCollector:
         self._spot_cache = (spot, observed_at)
         return spot
 
-    def _filter_and_rank_markets(self, raw_markets: list[dict], observed_at: datetime) -> list[dict]:
-        eligible: list[tuple[datetime, dict[str, Any]]] = []
+    def _filter_and_rank_markets(self, raw_markets: list[dict], observed_at: datetime, spot_price: float) -> list[dict]:
+        eligible: list[tuple[tuple[float, datetime], dict[str, Any]]] = []
         min_delta = timedelta(minutes=self.config.min_minutes_to_expiry)
         max_delta = timedelta(minutes=self.config.max_minutes_to_expiry) if self.config.max_minutes_to_expiry is not None else None
         for raw_market in raw_markets:
@@ -176,9 +192,22 @@ class HybridCollector:
                 continue
             if max_delta is not None and time_to_expiry > max_delta:
                 continue
-            eligible.append((expiry, dict(raw_market)))
+            eligible.append((self._market_rank_key(raw_market, expiry=expiry, spot_price=spot_price), dict(raw_market)))
         eligible.sort(key=lambda item: item[0])
         return [raw for _, raw in eligible[: self.config.market_limit]]
+
+    @staticmethod
+    def _market_rank_key(raw_market: dict[str, Any], *, expiry: datetime, spot_price: float) -> tuple[float, datetime]:
+        threshold_raw = raw_market.get("threshold") or raw_market.get("strike") or raw_market.get("floor_strike")
+        distance = float("inf")
+        if threshold_raw is not None:
+            try:
+                threshold = float(threshold_raw)
+                if spot_price > 0:
+                    distance = abs(threshold - spot_price) / spot_price
+            except (TypeError, ValueError):
+                pass
+        return (distance, expiry)
 
     @staticmethod
     def _parse_market_expiry(raw_market: dict[str, Any]) -> datetime | None:
