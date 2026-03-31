@@ -24,7 +24,7 @@ st.set_page_config(page_title="Kalshi BTC Bot", layout="wide")
 
 @st.cache_resource
 def load_runtime():
-    settings, engine = build_engine()
+    settings, engine = build_engine(attach_calibration=False)
     store = SnapshotStore(str(settings.collector["sqlite_path"]))
     return settings, engine, store
 
@@ -242,7 +242,10 @@ def main() -> None:
 
     extra_paper_cols = st.columns(3)
     extra_paper_cols[0].metric("Session Notional", round(float(paper_summary["session_notional"]), 2))
-    extra_paper_cols[1].metric("Calibrators Active", len(engine.calibrators))
+    extra_paper_cols[1].metric(
+        "Calibration",
+        "Enabled" if bool(settings.raw.get("calibration", {}).get("enabled", False)) else "Off",
+    )
     extra_paper_cols[2].metric("Recorded Fills", len(paper_state.get("fills", [])))
 
     st.subheader("Signal Summary")

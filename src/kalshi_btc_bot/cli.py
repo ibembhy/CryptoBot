@@ -136,7 +136,7 @@ def parse_numeric_list(raw: str, *, cast):
     return values
 
 
-def build_engine():
+def build_engine(*, attach_calibration: bool = True):
     settings = load_settings()
     gbm_model = GBMThresholdModel(
         drift=float(settings.model["drift"]),
@@ -212,7 +212,7 @@ def build_engine():
         fusion_config=fusion_config,
         risk_config=risk_config,
     )
-    if bool(settings.raw.get("calibration", {}).get("enabled", False)):
+    if attach_calibration and bool(settings.raw.get("calibration", {}).get("enabled", False)):
         attach_replay_calibrators(settings, engine)
     return settings, engine
 
