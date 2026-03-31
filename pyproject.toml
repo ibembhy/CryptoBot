@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalshi-btc-bot"
+version = "0.1.0"
+description = "Kalshi Bitcoin prediction-market trading bot MVP"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=45.0.0",
+  "numpy>=2.0.0",
+  "pandas>=2.2.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+  "websockets>=16.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+ui = ["streamlit>=1.44.0"]
+
+[project.scripts]
+kalshi-btc-bot = "kalshi_btc_bot.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

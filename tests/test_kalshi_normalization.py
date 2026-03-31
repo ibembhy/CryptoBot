@@ -1,0 +1,83 @@
+from datetime import datetime, timezone
+import unittest
+
+from kalshi_btc_bot.markets.normalize import normalize_market
+
+
+class KalshiNormalizationTests(unittest.TestCase):
+    def test_threshold_market_normalization(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTC",
+                "ticker": "KXBTC-65000",
+                "contract_type": "threshold",
+                "expiry": "2026-03-30T16:00:00Z",
+                "threshold": 65000,
+                "direction": "above",
+                "yes_ask": 0.43,
+                "yes_bid": 0.41,
+            },
+            spot_price=64000,
+            observed_at=datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.contract_type, "threshold")
+        self.assertEqual(snapshot.threshold, 65000)
+        self.assertEqual(snapshot.implied_probability, 0.43)
+
+    def test_range_market_normalization(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTC",
+                "ticker": "KXBTC-RANGE",
+                "contract_type": "range",
+                "expiry": "2026-03-30T16:00:00Z",
+                "floor": 63000,
+                "cap": 65000,
+                "yes_ask": 44,
+                "yes_bid": 42,
+            },
+            spot_price=64000,
+            observed_at=datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.range_low, 63000)
+        self.assertEqual(snapshot.range_high, 65000)
+        self.assertEqual(snapshot.yes_ask, 0.44)
+
+    def test_finalized_market_prefers_close_time_and_maps_settlement(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTCD",
+                "ticker": "KXBTCD-26MAR3020-T75799.99",
+                "contract_type": "threshold",
+                "close_time": "2026-03-31T00:00:00Z",
+                "expiration_time": "2026-04-07T00:00:00Z",
+                "threshold": 75799.99,
+                "direction": "above",
+                "result": "no",
+                "settlement_value_dollars": "0.0000",
+            },
+            spot_price=75000,
+            observed_at=datetime(2026, 3, 30, 23, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.expiry, datetime(2026, 3, 31, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(snapshot.settlement_price, 0.0)
+
+    def test_threshold_direction_can_be_inferred_from_subtitle(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTCD",
+                "ticker": "KXBTCD-26MAR3012-T67599.99",
+                "contract_type": "threshold",
+                "close_time": "2026-03-30T16:00:00Z",
+                "threshold": 67599.99,
+                "subtitle": "$67,600 or above",
+                "yes_sub_title": "$67,600 or above",
+            },
+            spot_price=67000,
+            observed_at=datetime(2026, 3, 30, 15, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.direction, "above")
+
+
+if __name__ == "__main__":
+    unittest.main()
