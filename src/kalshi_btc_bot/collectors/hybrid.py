@@ -211,7 +211,7 @@ class HybridCollector:
 
     @staticmethod
     def _parse_market_expiry(raw_market: dict[str, Any]) -> datetime | None:
-        for key in ("expiry", "expiration_time", "close_time", "settlement_time"):
+        for key in ("close_time", "expected_expiration_time", "expiry", "settlement_time", "expiration_time"):
             value = raw_market.get(key)
             if not value:
                 continue

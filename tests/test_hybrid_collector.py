@@ -144,6 +144,17 @@ class HybridCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshots), 2)
         self.assertTrue(all(snapshot.market_ticker.startswith("KXBTCD-NEAR-") for snapshot in snapshots))
 
+    async def test_parse_market_expiry_prefers_close_time_over_later_expiration_time(self):
+        near_expiry = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        raw_market = {
+            "close_time": (near_expiry + timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
+            "expiration_time": (near_expiry + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+        }
+        parsed = HybridCollector._parse_market_expiry(raw_market)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertLess(parsed, near_expiry + timedelta(hours=1))
+
 
 if __name__ == "__main__":
     unittest.main()
