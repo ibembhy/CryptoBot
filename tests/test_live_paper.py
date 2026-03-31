@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
@@ -172,6 +173,73 @@ class LivePaperTraderTests(unittest.TestCase):
         self.assertEqual(second["positions_opened"], 0)
         self.assertEqual(second["positions_closed"], 1)
         self.assertTrue(ledger_path.exists())
+
+    def test_live_paper_trader_ranks_candidates_before_opening(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "live_paper_rank_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        ledger_path = base_dir / "live_paper_rank_state.json"
+        if ledger_path.exists():
+            ledger_path.unlink()
+
+        observed_at = datetime(2026, 3, 31, 14, 0, tzinfo=timezone.utc)
+        weaker = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-WEAK",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=observed_at,
+            expiry=observed_at + timedelta(minutes=20),
+            spot_price=65000.0,
+            threshold=65120.0,
+            direction="below",
+            yes_bid=0.32,
+            yes_ask=0.35,
+            no_bid=0.63,
+            no_ask=0.66,
+            volume=1500.0,
+        )
+        stronger = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-STRONG",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=observed_at,
+            expiry=observed_at + timedelta(minutes=20),
+            spot_price=65000.0,
+            threshold=65080.0,
+            direction="below",
+            yes_bid=0.26,
+            yes_ask=0.28,
+            no_bid=0.70,
+            no_ask=0.73,
+            volume=1500.0,
+        )
+
+        engine = self._engine()
+        engine.risk_config = replace(engine.risk_config, max_open_positions=1, max_positions_per_expiry=1)
+        trader = LivePaperTrader(
+            collector=_FakeCollector([[weaker, stronger]]),
+            engine=engine,
+            coinbase_client=_FakeCoinbaseClient(),
+            snapshot_store=SnapshotStore(db_path),
+            config=LivePaperConfig(
+                feature_history_hours=24,
+                poll_interval_seconds=30,
+                ledger_path=str(ledger_path),
+                feature_timeframe="1m",
+                volatility_window=20,
+                annualization_factor=105120.0,
+            ),
+        )
+
+        result = asyncio.run(trader.run_once())
+        self.assertEqual(result["positions_opened"], 1)
+        self.assertEqual(result["opened"][0]["market_ticker"], "KXBTCD-STRONG")
 
 
 if __name__ == "__main__":

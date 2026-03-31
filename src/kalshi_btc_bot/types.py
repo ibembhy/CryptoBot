@@ -61,6 +61,7 @@ class ProbabilityEstimate:
     probability: float
     inputs: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
+    raw_probability: float | None = None
 
 
 @dataclass(frozen=True)

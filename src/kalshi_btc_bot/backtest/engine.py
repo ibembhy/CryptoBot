@@ -8,6 +8,7 @@ import pandas as pd
 from kalshi_btc_bot.backtest.fills import apply_entry_fill, apply_exit_fill
 from kalshi_btc_bot.backtest.metrics import summarize_trades
 from kalshi_btc_bot.models.base import ProbabilityModel
+from kalshi_btc_bot.signals.calibration import ProbabilityCalibrator
 from kalshi_btc_bot.signals.fusion import FusionConfig, fuse_signals
 from kalshi_btc_bot.signals.engine import SignalConfig, generate_signal
 from kalshi_btc_bot.trading.exits import ExitConfig, evaluate_exit
@@ -45,6 +46,7 @@ class BacktestEngine:
         models: dict[str, ProbabilityModel] | None = None,
         fusion_config: FusionConfig | None = None,
         risk_config: RiskConfig | None = None,
+        calibrators: dict[str, ProbabilityCalibrator] | None = None,
     ) -> None:
         self.model = model
         self.models = models or {getattr(model, "model_name", "default"): model}
@@ -53,6 +55,7 @@ class BacktestEngine:
         self.backtest_config = backtest_config
         self.fusion_config = fusion_config
         self.risk_config = risk_config or RiskConfig(0.0, 0.0, 0, 0, 0.0, 0.0)
+        self.calibrators = calibrators or {}
 
     def compare_strategies(self, snapshots: list[MarketSnapshot], feature_frame: pd.DataFrame) -> dict[str, BacktestResult | dict]:
         hold = self.run_strategy("hold_to_settlement", snapshots, feature_frame)
@@ -353,7 +356,13 @@ class BacktestEngine:
         return None if pd.isna(value) else float(value)
 
     def _build_signal(self, snapshot: MarketSnapshot, volatility: float):
-        estimates = {name: model.estimate(snapshot, volatility) for name, model in self.models.items()}
+        estimates = {}
+        for name, model in self.models.items():
+            estimate = model.estimate(snapshot, volatility)
+            calibrator = self.calibrators.get(name)
+            if calibrator is not None:
+                estimate = calibrator.apply_to_estimate(estimate)
+            estimates[name] = estimate
         signals = {
             name: generate_signal(snapshot, estimate, self.signal_config, as_of=snapshot.observed_at)
             for name, estimate in estimates.items()

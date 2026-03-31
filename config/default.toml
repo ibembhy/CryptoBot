@@ -35,6 +35,12 @@ max_spread_cents = 8
 liquidity_penalty_per_100_volume = 0.002
 max_data_age_seconds = 120
 
+[calibration]
+enabled = true
+bucket_width = 0.05
+min_samples = 50
+min_bucket_count = 3
+
 [strategy]
 mode = "hybrid"
 primary_model = "gbm_threshold"

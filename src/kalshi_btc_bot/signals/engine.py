@@ -65,6 +65,7 @@ def generate_signal(
     *,
     as_of: datetime | None = None,
 ) -> TradingSignal:
+    base_probability = estimate.raw_probability if estimate.raw_probability is not None else estimate.probability
     if (
         config.max_near_money_bps is not None
         and snapshot.threshold is not None
@@ -76,7 +77,7 @@ def generate_signal(
                 market_ticker=snapshot.market_ticker,
                 action="no_action",
                 side=None,
-                raw_model_probability=estimate.probability,
+                raw_model_probability=base_probability,
                 model_probability=estimate.probability,
                 market_probability=snapshot.implied_probability,
                 edge=None,
@@ -91,7 +92,7 @@ def generate_signal(
             market_ticker=snapshot.market_ticker,
             action="no_action",
             side=None,
-            raw_model_probability=estimate.probability,
+            raw_model_probability=base_probability,
             model_probability=estimate.probability,
             market_probability=snapshot.implied_probability,
             edge=None,
@@ -106,7 +107,7 @@ def generate_signal(
             market_ticker=snapshot.market_ticker,
             action="no_action",
             side=None,
-            raw_model_probability=estimate.probability,
+            raw_model_probability=base_probability,
             model_probability=estimate.probability,
             market_probability=snapshot.implied_probability,
             edge=None,
@@ -118,7 +119,10 @@ def generate_signal(
         )
 
     candidates: list[TradingSignal] = []
-    for side, raw_probability in (("yes", estimate.probability), ("no", 1.0 - estimate.probability)):
+    for side, raw_probability, calibrated_probability in (
+        ("yes", base_probability, estimate.probability),
+        ("no", 1.0 - base_probability, 1.0 - estimate.probability),
+    ):
         entry_price_cents, market_probability = _entry_price_and_probability(snapshot, side)
         if entry_price_cents is None or market_probability is None:
             continue
@@ -127,7 +131,7 @@ def generate_signal(
         spread_cents = _spread_cents(snapshot, side)
         if spread_cents is not None and spread_cents > config.max_spread_cents:
             continue
-        conservative_probability = _conservative_probability(raw_probability, side, config.uncertainty_penalty)
+        conservative_probability = _conservative_probability(calibrated_probability, side, config.uncertainty_penalty)
         liquidity_penalty = 0.0
         if snapshot.volume is not None and snapshot.volume > 0:
             liquidity_penalty = config.liquidity_penalty_per_100_volume * (100.0 / snapshot.volume)
@@ -137,7 +141,10 @@ def generate_signal(
         expected_value_cents = round(fair_value_cents - entry_price_cents, 2)
         action = "no_action"
         reason = "Edge below threshold."
-        quality_score = max(edge, 0.0) * max(conservative_probability, 0.0)
+        spread_penalty = (spread_cents or 0) / 10.0
+        liquidity_scale = 1.0 + liquidity_penalty * 25.0
+        quality_score = max(expected_value_cents or 0.0, 0.0) * max(edge or 0.0, 0.0) / max(1.0 + spread_penalty, 1.0)
+        quality_score = quality_score / max(liquidity_scale, 1.0)
         if edge >= config.min_edge and conservative_probability >= config.min_confidence and expected_value_cents > 0:
             action = "buy_yes" if side == "yes" else "buy_no"
             reason = f"Conservative edge {edge:.4f} exceeds threshold."
@@ -167,7 +174,7 @@ def generate_signal(
             market_ticker=snapshot.market_ticker,
             action="no_action",
             side=None,
-            raw_model_probability=estimate.probability,
+            raw_model_probability=base_probability,
             model_probability=estimate.probability,
             market_probability=snapshot.implied_probability,
             edge=None,

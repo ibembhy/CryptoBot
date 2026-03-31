@@ -69,9 +69,25 @@ class LivePaperTrader:
             if record is not None:
                 closed.append(record)
 
+        candidates: list[tuple[float, float, float, MarketSnapshot]] = []
         for snapshot in snapshots:
             if self.position_book.has_open_position(snapshot.market_ticker):
                 continue
+            evaluation = self.engine.evaluate_snapshot(snapshot, feature_frame)
+            if evaluation == (None, None):
+                continue
+            signal, estimate = evaluation
+            if signal is None or estimate is None or signal.action == "no_action" or signal.side is None or signal.entry_price_cents is None:
+                continue
+            ranking_score = signal.quality_score
+            edge = signal.edge or -999.0
+            spread = -(signal.spread_cents or 99)
+            snapshot.metadata["_paper_signal"] = signal
+            snapshot.metadata["_paper_estimate"] = estimate
+            candidates.append((ranking_score, edge, spread, snapshot))
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        for _, _, _, snapshot in candidates:
             record = self._maybe_open_position(snapshot, feature_frame)
             if record is not None:
                 opened.append(record)
@@ -111,10 +127,15 @@ class LivePaperTrader:
     def _maybe_open_position(self, snapshot: MarketSnapshot, feature_frame) -> dict[str, object] | None:
         if snapshot.settlement_price is not None or snapshot.observed_at >= snapshot.expiry:
             return None
-        evaluation = self.engine.evaluate_snapshot(snapshot, feature_frame)
-        if evaluation == (None, None):
-            return None
-        signal, estimate = evaluation
+        cached_signal = snapshot.metadata.pop("_paper_signal", None)
+        cached_estimate = snapshot.metadata.pop("_paper_estimate", None)
+        if cached_signal is not None and cached_estimate is not None:
+            signal, estimate = cached_signal, cached_estimate
+        else:
+            evaluation = self.engine.evaluate_snapshot(snapshot, feature_frame)
+            if evaluation == (None, None):
+                return None
+            signal, estimate = evaluation
         if signal is None or estimate is None or signal.action == "no_action" or signal.side is None or signal.entry_price_cents is None:
             return None
         contracts = self.engine.backtest_config.default_contracts
@@ -161,6 +182,7 @@ class LivePaperTrader:
             "contracts": position.contracts,
             "entry_price_cents": position.entry_price_cents,
             "edge": signal.edge,
+            "quality_score": signal.quality_score,
             "model_probability": signal.model_probability,
             "reason": signal.reason,
             "estimate_model": estimate.model_name,

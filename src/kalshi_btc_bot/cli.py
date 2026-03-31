@@ -25,6 +25,7 @@ from kalshi_btc_bot.reports.comparison import (
     filter_snapshots_for_focus,
 )
 from kalshi_btc_bot.settings import load_settings
+from kalshi_btc_bot.signals.calibration import build_engine_calibrators
 from kalshi_btc_bot.signals.fusion import FusionConfig
 from kalshi_btc_bot.signals.engine import SignalConfig
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
@@ -202,7 +203,7 @@ def build_engine():
         max_daily_loss=float(settings.risk["max_daily_loss"]),
         max_drawdown=float(settings.risk["max_drawdown"]),
     )
-    return settings, BacktestEngine(
+    engine = BacktestEngine(
         model=model,
         models=models,
         signal_config=signal_config,
@@ -211,6 +212,36 @@ def build_engine():
         fusion_config=fusion_config,
         risk_config=risk_config,
     )
+    if bool(settings.raw.get("calibration", {}).get("enabled", False)):
+        attach_replay_calibrators(settings, engine)
+    return settings, engine
+
+
+def attach_replay_calibrators(settings, engine: BacktestEngine) -> dict[str, int]:
+    store = SnapshotStore(str(settings.collector["sqlite_path"]))
+    snapshots = store.load_snapshots(
+        series_ticker=str(settings.collector["series_ticker"]),
+        replay_ready_only=True,
+        reference_time=datetime.now(timezone.utc),
+    )
+    if not snapshots:
+        engine.calibrators = {}
+        return {}
+    dataset = build_replay_dataset(
+        snapshots,
+        volatility_window=int(settings.data["volatility_window"]),
+        annualization_factor=float(settings.data["annualization_factor"]),
+    )
+    calibrators = build_engine_calibrators(
+        engine,
+        snapshots=dataset.snapshots,
+        feature_frame=dataset.feature_frame,
+        bucket_width=float(settings.raw.get("calibration", {}).get("bucket_width", 0.05)),
+        min_samples=int(settings.raw.get("calibration", {}).get("min_samples", 50)),
+        min_bucket_count=int(settings.raw.get("calibration", {}).get("min_bucket_count", 3)),
+    )
+    engine.calibrators = calibrators
+    return {name: calibrator.sample_count for name, calibrator in calibrators.items()}
 
 
 def build_collector(settings):
