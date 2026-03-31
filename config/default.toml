@@ -93,11 +93,11 @@ settlement_recent_hours = 48
 
 [paper]
 feature_history_hours = 48
-poll_interval_seconds = 30
+poll_interval_seconds = 60
 ledger_path = "data/paper_trading_state.json"
 settlement_check_interval_seconds = 300
 settlement_recent_hours = 72
-settlement_max_markets_per_cycle = 100
+settlement_max_markets_per_cycle = 0
 
 [reporting]
 sensitivity_vol_multipliers = [0.75, 1.0, 1.25]

@@ -289,16 +289,21 @@ def build_live_paper_trader(settings):
         verify_ssl=bool(settings.data["coinbase_verify_ssl"]),
     )
     store = SnapshotStore(str(settings.collector["sqlite_path"]))
-    _, engine = build_engine()
-    settlement_enricher = SettlementEnricher(
-        kalshi_client=KalshiClient(),
-        snapshot_store=store,
-        config=SettlementEnrichmentConfig(
-            series_ticker=str(settings.collector["series_ticker"]),
-            max_markets=int(settings.paper.get("settlement_max_markets_per_cycle", 100)),
-            recent_hours=int(settings.paper.get("settlement_recent_hours", settings.collector["settlement_recent_hours"])),
-        ),
-    )
+    _, engine = build_engine(attach_calibration=False)
+    settlement_max_markets = int(settings.paper.get("settlement_max_markets_per_cycle", 0))
+    settlement_enricher = None
+    calibrator_refresher = None
+    if settlement_max_markets > 0:
+        settlement_enricher = SettlementEnricher(
+            kalshi_client=KalshiClient(),
+            snapshot_store=store,
+            config=SettlementEnrichmentConfig(
+                series_ticker=str(settings.collector["series_ticker"]),
+                max_markets=settlement_max_markets,
+                recent_hours=int(settings.paper.get("settlement_recent_hours", settings.collector["settlement_recent_hours"])),
+            ),
+        )
+        calibrator_refresher = lambda: attach_replay_calibrators(settings, engine)
     config = LivePaperConfig(
         feature_history_hours=int(settings.paper["feature_history_hours"]),
         poll_interval_seconds=int(settings.paper["poll_interval_seconds"]),
@@ -317,7 +322,7 @@ def build_live_paper_trader(settings):
         snapshot_store=store,
         config=config,
         settlement_enricher=settlement_enricher,
-        calibrator_refresher=lambda: attach_replay_calibrators(settings, engine),
+        calibrator_refresher=calibrator_refresher,
     )
 
 
