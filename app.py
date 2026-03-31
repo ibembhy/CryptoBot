@@ -29,8 +29,48 @@ def load_runtime():
     return settings, engine, store
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def load_summary_cached(sqlite_path: str, series_ticker: str) -> dict[str, object]:
+    store = SnapshotStore(sqlite_path)
+    return store.dataset_summary(series_ticker=series_ticker, reference_time=datetime.now(timezone.utc))
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_recent_snapshots_cached(
+    sqlite_path: str,
+    *,
+    series_ticker: str,
+    lookback_hours: int,
+    limit: int | None,
+):
+    store = SnapshotStore(sqlite_path)
+    return load_recent_snapshots(store, series_ticker=series_ticker, lookback_hours=lookback_hours, limit=limit)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_paper_state_cached(path: str):
+    return load_paper_trading_state(path)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def build_signal_table_cached(*, _engine, snapshots, volatility_window: int, annualization_factor: float):
+    return build_live_signal_table(
+        engine=_engine,
+        snapshots=snapshots,
+        volatility_window=volatility_window,
+        annualization_factor=annualization_factor,
+    )
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def build_latest_snapshot_table_cached(snapshots):
+    return build_latest_snapshot_table(snapshots)
+
+
 def main() -> None:
     settings, engine, store = load_runtime()
+    sqlite_path = str(settings.collector["sqlite_path"])
+    paper_ledger_path = str(settings.paper["ledger_path"])
     query_params = st.query_params
     dashboard_username = os.getenv("KALSHI_BTC_DASHBOARD_USERNAME", "").strip()
     dashboard_password = os.getenv("KALSHI_BTC_DASHBOARD_PASSWORD", "").strip()
@@ -95,15 +135,21 @@ def main() -> None:
                 width=0,
             )
 
-    summary = store.dataset_summary(series_ticker=series_ticker, reference_time=datetime.now(timezone.utc))
-    recent_snapshots = load_recent_snapshots(store, series_ticker=series_ticker, lookback_hours=lookback_hours)
-    latest_snapshot_table = build_latest_snapshot_table(recent_snapshots)
-    paper_state = load_paper_trading_state(str(settings.paper["ledger_path"]))
+    dashboard_limit = max(signal_limit * 25, snapshot_limit * 25, 2000)
+    summary = load_summary_cached(sqlite_path, series_ticker)
+    recent_snapshots = load_recent_snapshots_cached(
+        sqlite_path,
+        series_ticker=series_ticker,
+        lookback_hours=lookback_hours,
+        limit=dashboard_limit,
+    )
+    latest_snapshot_table = build_latest_snapshot_table_cached(recent_snapshots)
+    paper_state = load_paper_state_cached(paper_ledger_path)
     open_positions_table = build_positions_table(paper_state.get("open_positions", []))
     closed_positions_table = build_positions_table(paper_state.get("closed_positions", []))
     fills_table = build_fills_table(paper_state.get("fills", []))
-    signal_table = build_live_signal_table(
-        engine=engine,
+    signal_table = build_signal_table_cached(
+        _engine=engine,
         snapshots=recent_snapshots,
         volatility_window=int(settings.data["volatility_window"]),
         annualization_factor=float(settings.data["annualization_factor"]),
