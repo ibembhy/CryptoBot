@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -29,6 +30,23 @@ def load_runtime():
 
 def main() -> None:
     settings, engine, store = load_runtime()
+    dashboard_username = os.getenv("KALSHI_BTC_DASHBOARD_USERNAME", "").strip()
+    dashboard_password = os.getenv("KALSHI_BTC_DASHBOARD_PASSWORD", "").strip()
+    if dashboard_username and dashboard_password:
+        authenticated = st.session_state.get("dashboard_authenticated", False)
+        if not authenticated:
+            st.title("Kalshi BTC Bot Login")
+            with st.form("dashboard_login"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Log In")
+            if submitted:
+                if username == dashboard_username and password == dashboard_password:
+                    st.session_state["dashboard_authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+            return
     query_params = st.query_params
     auto_refresh_default = str(query_params.get("auto_refresh", "false")).lower() == "true"
     try:
