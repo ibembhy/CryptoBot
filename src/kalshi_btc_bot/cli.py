@@ -29,6 +29,7 @@ from kalshi_btc_bot.signals.fusion import FusionConfig
 from kalshi_btc_bot.signals.engine import SignalConfig
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
 from kalshi_btc_bot.trading.exits import ExitConfig
+from kalshi_btc_bot.trading.live_paper import LivePaperConfig, LivePaperTrader
 from kalshi_btc_bot.trading.risk import RiskConfig
 
 
@@ -48,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--series", type=str, default=None)
     run.add_argument("--max-minutes-to-expiry", type=int, default=None)
     run.add_argument("--min-minutes-to-expiry", type=int, default=None)
+    paper_once = subparsers.add_parser("paper-trade-once", help="Run one live paper-trading cycle from current market data")
+    paper_once.add_argument("--series", type=str, default=None)
+    paper_once.add_argument("--max-minutes-to-expiry", type=int, default=None)
+    paper_once.add_argument("--min-minutes-to-expiry", type=int, default=None)
+    paper_forever = subparsers.add_parser("paper-trade-forever", help="Continuously paper trade live Kalshi BTC markets")
+    paper_forever.add_argument("--series", type=str, default=None)
+    paper_forever.add_argument("--max-minutes-to-expiry", type=int, default=None)
+    paper_forever.add_argument("--min-minutes-to-expiry", type=int, default=None)
     backfill = subparsers.add_parser("backfill-candles", help="Backfill Kalshi candlestick history into SQLite snapshots")
     backfill.add_argument("--series", type=str, default=None)
     backfill.add_argument("--start-ts", type=int, required=True)
@@ -143,7 +152,8 @@ def build_engine():
         gbm_model.model_name: gbm_model,
         latency_model.model_name: latency_model,
     }
-    model_name = str(settings.model["name"])
+    requested_model = str(settings.model["name"])
+    model_name = requested_model if requested_model in models else str(settings.strategy["primary_model"])
     model = models[model_name]
     signal_config = SignalConfig(
         min_edge=float(settings.signal["min_edge"]),
@@ -238,6 +248,31 @@ def build_collector(settings):
         snapshot_store=store,
         config=config,
         websocket_headers_factory=websocket_headers_factory,
+    )
+
+
+def build_live_paper_trader(settings):
+    collector = build_collector(settings)
+    coinbase = CoinbaseClient(
+        product_id=str(settings.data["coinbase_product_id"]),
+        verify_ssl=bool(settings.data["coinbase_verify_ssl"]),
+    )
+    store = SnapshotStore(str(settings.collector["sqlite_path"]))
+    _, engine = build_engine()
+    config = LivePaperConfig(
+        feature_history_hours=int(settings.paper["feature_history_hours"]),
+        poll_interval_seconds=int(settings.paper["poll_interval_seconds"]),
+        ledger_path=str(settings.paper["ledger_path"]),
+        feature_timeframe=str(settings.data["base_timeframe"]),
+        volatility_window=int(settings.data["volatility_window"]),
+        annualization_factor=float(settings.data["annualization_factor"]),
+    )
+    return LivePaperTrader(
+        collector=collector,
+        engine=engine,
+        coinbase_client=coinbase,
+        snapshot_store=store,
+        config=config,
     )
 
 
@@ -538,6 +573,35 @@ def main() -> None:
             asyncio.run(collector.collect_forever())
         except KeyboardInterrupt:
             logging.getLogger(__name__).info("Collector stopped by user.")
+        return
+    if args.command == "paper-trade-once":
+        trader = build_live_paper_trader(settings)
+        if args.series:
+            trader.collector.config.series_ticker = args.series
+        if args.max_minutes_to_expiry is not None:
+            trader.collector.config.max_minutes_to_expiry = args.max_minutes_to_expiry
+        if args.min_minutes_to_expiry is not None:
+            trader.collector.config.min_minutes_to_expiry = args.min_minutes_to_expiry
+        result = asyncio.run(trader.run_once())
+        print(json.dumps(result, indent=2, default=str))
+        return
+    if args.command == "paper-trade-forever":
+        trader = build_live_paper_trader(settings)
+        if args.series:
+            trader.collector.config.series_ticker = args.series
+        if args.max_minutes_to_expiry is not None:
+            trader.collector.config.max_minutes_to_expiry = args.max_minutes_to_expiry
+        if args.min_minutes_to_expiry is not None:
+            trader.collector.config.min_minutes_to_expiry = args.min_minutes_to_expiry
+        logging.getLogger(__name__).info(
+            "Starting live paper trader for series %s with ledger %s",
+            trader.collector.config.series_ticker,
+            settings.paper["ledger_path"],
+        )
+        try:
+            asyncio.run(trader.run_forever())
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).info("Paper trader stopped by user.")
         return
     if args.command == "backfill-candles":
         series_ticker = args.series or str(settings.collector["series_ticker"])

@@ -105,7 +105,16 @@ def normalize_market(
     mid_price = sum(mid_components) / len(mid_components) if mid_components else None
     implied_probability = yes_ask if yes_ask is not None else mid_price
 
-    expiry_raw = _coalesce(raw_market, "expiry", "close_time", "settlement_time", "expiration_time", "expected_expiration_time")
+    # Kalshi's expiration_time can reflect a later archival/settlement deadline.
+    # For trading and replay we care about when the market stops trading, which is close_time.
+    expiry_raw = _coalesce(
+        raw_market,
+        "close_time",
+        "expected_expiration_time",
+        "expiry",
+        "settlement_time",
+        "expiration_time",
+    )
     if expiry_raw is None:
         raise ValueError("Market missing expiry")
     expiry = ensure_utc(expiry_raw).to_pydatetime()

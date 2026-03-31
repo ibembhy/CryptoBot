@@ -79,6 +79,10 @@ class Settings:
     def risk(self) -> dict[str, Any]:
         return self.raw["risk"]
 
+    @property
+    def paper(self) -> dict[str, Any]:
+        return self.raw["paper"]
+
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
     load_dotenv()

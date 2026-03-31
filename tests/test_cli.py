@@ -111,6 +111,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.command, "enrich-settlements")
         self.assertEqual(args.recent_hours, 24)
 
+    def test_paper_trade_once_command_is_registered(self):
+        parser = build_parser()
+        args = parser.parse_args(["paper-trade-once", "--max-minutes-to-expiry", "30"])
+        self.assertEqual(args.command, "paper-trade-once")
+        self.assertEqual(args.max_minutes_to_expiry, 30)
+
+    def test_paper_trade_forever_command_is_registered(self):
+        parser = build_parser()
+        args = parser.parse_args(["paper-trade-forever", "--min-minutes-to-expiry", "0"])
+        self.assertEqual(args.command, "paper-trade-forever")
+        self.assertEqual(args.min_minutes_to_expiry, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

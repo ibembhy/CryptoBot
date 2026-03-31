@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -115,3 +117,51 @@ def build_latest_snapshot_table(snapshots: list[MarketSnapshot]) -> pd.DataFrame
             }
         )
     return pd.DataFrame(rows)
+
+
+def load_paper_trading_state(path: str | Path) -> dict[str, object]:
+    ledger_path = Path(path)
+    if not ledger_path.exists():
+        return {
+            "updated_at": None,
+            "open_positions": [],
+            "closed_positions": [],
+            "fills": [],
+            "realized_pnl": 0.0,
+            "session_notional": 0.0,
+        }
+    return json.loads(ledger_path.read_text(encoding="utf-8"))
+
+
+def build_positions_table(positions: list[dict[str, object]]) -> pd.DataFrame:
+    if not positions:
+        return pd.DataFrame()
+    frame = pd.DataFrame(positions)
+    preferred = [
+        "position_id",
+        "market_ticker",
+        "side",
+        "contracts",
+        "entry_time",
+        "entry_price_cents",
+        "exit_time",
+        "exit_price_cents",
+        "exit_trigger",
+        "realized_pnl",
+        "status",
+        "strategy_mode",
+    ]
+    columns = [column for column in preferred if column in frame.columns]
+    return frame[columns]
+
+
+def build_fills_table(fills: list[dict[str, object]]) -> pd.DataFrame:
+    if not fills:
+        return pd.DataFrame()
+    frame = pd.DataFrame(fills)
+    preferred = ["timestamp", "market_ticker", "side", "contracts", "price_cents", "fees_paid"]
+    columns = [column for column in preferred if column in frame.columns]
+    frame = frame[columns]
+    if "timestamp" in frame.columns:
+        frame = frame.sort_values("timestamp", ascending=False).reset_index(drop=True)
+    return frame

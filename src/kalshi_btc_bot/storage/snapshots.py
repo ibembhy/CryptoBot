@@ -11,6 +11,16 @@ from kalshi_btc_bot.types import MarketSnapshot
 
 class SnapshotStore:
     SQLITE_TIMEOUT_SECONDS = 30.0
+    EFFECTIVE_EXPIRY_SQL = """
+        COALESCE(
+            json_extract(metadata_json, '$.close_time'),
+            json_extract(metadata_json, '$.expected_expiration_time'),
+            json_extract(metadata_json, '$.expiry'),
+            json_extract(metadata_json, '$.settlement_time'),
+            json_extract(metadata_json, '$.expiration_time'),
+            expiry
+        )
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -121,13 +131,13 @@ class SnapshotStore:
         if replay_ready_only:
             reference = (reference_time or datetime.now().astimezone()).isoformat()
             conditions.append(
-                """
+                f"""
                 market_ticker IN (
                     SELECT market_ticker
                     FROM market_snapshots
                     GROUP BY market_ticker
                     HAVING MAX(settlement_price) IS NOT NULL
-                       AND MIN(expiry) <= :reference_time
+                       AND MIN({self.EFFECTIVE_EXPIRY_SQL}) <= :reference_time
                 )
                 """
             )
@@ -146,7 +156,7 @@ class SnapshotStore:
                     FROM market_snapshots
                     GROUP BY market_ticker, observed_at
                 )
-                SELECT s.*
+                SELECT s.*, {self.EFFECTIVE_EXPIRY_SQL} AS effective_expiry
                 FROM market_snapshots s
                 JOIN latest l ON s.id = l.id
                 {where_clause.replace("WHERE", "WHERE", 1)}
@@ -180,9 +190,9 @@ class SnapshotStore:
                     MIN(observed_at) AS first_observed_at,
                     MAX(observed_at) AS last_observed_at,
                     COUNT(DISTINCT CASE WHEN settlement_price IS NOT NULL THEN market_ticker END) AS settled_markets,
-                    COUNT(DISTINCT CASE WHEN expiry <= :reference_time THEN market_ticker END) AS expired_markets,
-                    COUNT(DISTINCT CASE WHEN expiry <= :reference_time AND settlement_price IS NOT NULL THEN market_ticker END) AS replay_ready_markets,
-                    COUNT(DISTINCT CASE WHEN expiry <= :reference_time AND settlement_price IS NULL THEN market_ticker END) AS unresolved_expired_markets
+                    COUNT(DISTINCT CASE WHEN {self.EFFECTIVE_EXPIRY_SQL} <= :reference_time THEN market_ticker END) AS expired_markets,
+                    COUNT(DISTINCT CASE WHEN {self.EFFECTIVE_EXPIRY_SQL} <= :reference_time AND settlement_price IS NOT NULL THEN market_ticker END) AS replay_ready_markets,
+                    COUNT(DISTINCT CASE WHEN {self.EFFECTIVE_EXPIRY_SQL} <= :reference_time AND settlement_price IS NULL THEN market_ticker END) AS unresolved_expired_markets
                 FROM market_snapshots
                 {where_clause}
                 """,
@@ -264,10 +274,10 @@ class SnapshotStore:
             conditions.append("series_ticker = :series_ticker")
             params["series_ticker"] = series_ticker
         if expired_before is not None:
-            conditions.append("expiry <= :expired_before")
+            conditions.append(f"{self.EFFECTIVE_EXPIRY_SQL} <= :expired_before")
             params["expired_before"] = expired_before.isoformat()
         if expired_after is not None:
-            conditions.append("expiry >= :expired_after")
+            conditions.append(f"{self.EFFECTIVE_EXPIRY_SQL} >= :expired_after")
             params["expired_after"] = expired_after.isoformat()
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -282,7 +292,7 @@ class SnapshotStore:
                 SELECT
                     market_ticker,
                     series_ticker,
-                    MIN(expiry) AS expiry,
+                    MIN({self.EFFECTIVE_EXPIRY_SQL}) AS expiry,
                     MAX(settlement_price) AS settlement_price,
                     COUNT(*) AS snapshot_count
                 FROM market_snapshots
@@ -327,7 +337,7 @@ class SnapshotStore:
             contract_type=row["contract_type"],
             underlying_symbol=row["underlying_symbol"],
             observed_at=datetime.fromisoformat(row["observed_at"]),
-            expiry=datetime.fromisoformat(row["expiry"]),
+            expiry=datetime.fromisoformat(row["effective_expiry"] if "effective_expiry" in row.keys() and row["effective_expiry"] else row["expiry"]),
             spot_price=float(row["spot_price"]),
             threshold=row["threshold"],
             range_low=row["range_low"],

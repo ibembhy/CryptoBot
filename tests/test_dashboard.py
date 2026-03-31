@@ -1,10 +1,18 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import unittest
 
 import pandas as pd
 
 from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine
-from kalshi_btc_bot.dashboard import build_latest_snapshot_table, build_live_signal_table, latest_snapshots_by_market
+from kalshi_btc_bot.dashboard import (
+    build_fills_table,
+    build_latest_snapshot_table,
+    build_live_signal_table,
+    build_positions_table,
+    latest_snapshots_by_market,
+    load_paper_trading_state,
+)
 from kalshi_btc_bot.models.gbm_threshold import GBMThresholdModel
 from kalshi_btc_bot.signals.engine import SignalConfig
 from kalshi_btc_bot.trading.exits import ExitConfig
@@ -120,6 +128,41 @@ class DashboardTests(unittest.TestCase):
         table = build_latest_snapshot_table([snapshot])
         self.assertEqual(len(table), 1)
         self.assertEqual(table.iloc[0]["market_ticker"], "KXBTCD-TEST")
+
+    def test_load_paper_trading_state_returns_defaults_when_missing(self):
+        state = load_paper_trading_state(Path("test_artifacts") / "missing_paper_state.json")
+        self.assertEqual(state["open_positions"], [])
+        self.assertEqual(state["realized_pnl"], 0.0)
+
+    def test_build_positions_and_fills_tables(self):
+        positions = [
+            {
+                "position_id": "pos-1",
+                "market_ticker": "KXBTCD-TEST",
+                "side": "yes",
+                "contracts": 1,
+                "entry_time": "2026-03-31T15:00:00+00:00",
+                "entry_price_cents": 40,
+                "status": "open",
+                "strategy_mode": "hybrid",
+            }
+        ]
+        fills = [
+            {
+                "timestamp": "2026-03-31T15:01:00+00:00",
+                "market_ticker": "KXBTCD-TEST",
+                "side": "buy_yes",
+                "contracts": 1,
+                "price_cents": 40,
+                "fees_paid": 0.0,
+            }
+        ]
+        positions_table = build_positions_table(positions)
+        fills_table = build_fills_table(fills)
+        self.assertFalse(positions_table.empty)
+        self.assertFalse(fills_table.empty)
+        self.assertIn("market_ticker", positions_table.columns)
+        self.assertIn("timestamp", fills_table.columns)
 
 
 if __name__ == "__main__":

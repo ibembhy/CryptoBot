@@ -16,7 +16,7 @@ annualization_factor = 105120.0
 coinbase_verify_ssl = true
 
 [model]
-name = "gbm_threshold"
+name = "hybrid"
 drift = 0.0
 volatility_floor = 0.05
 repricing_persistence_factor = 0.75
@@ -36,9 +36,9 @@ liquidity_penalty_per_100_volume = 0.002
 max_data_age_seconds = 120
 
 [strategy]
-mode = "single"
+mode = "hybrid"
 primary_model = "gbm_threshold"
-confirm_model = "gbm_threshold"
+confirm_model = "latency_repricing"
 primary_weight = 0.65
 confirm_weight = 0.35
 require_side_agreement = true
@@ -84,6 +84,11 @@ backfill_period_interval = 1
 backfill_batch_size = 100
 backfill_historical_pages = 5
 settlement_recent_hours = 48
+
+[paper]
+feature_history_hours = 48
+poll_interval_seconds = 30
+ledger_path = "data/paper_trading_state.json"
 
 [reporting]
 sensitivity_vol_multipliers = [0.75, 1.0, 1.25]

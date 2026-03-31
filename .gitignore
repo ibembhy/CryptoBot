@@ -14,6 +14,7 @@ data/*.out
 data/*.err
 data/*.sqlite3-shm
 data/*.sqlite3-wal
+data/*.json
 
 test_artifacts/
 repo_git/

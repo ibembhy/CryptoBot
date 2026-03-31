@@ -6,7 +6,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from kalshi_btc_bot.cli import build_engine
-from kalshi_btc_bot.dashboard import build_latest_snapshot_table, build_live_signal_table, load_recent_snapshots
+from kalshi_btc_bot.dashboard import (
+    build_fills_table,
+    build_latest_snapshot_table,
+    build_live_signal_table,
+    build_positions_table,
+    load_paper_trading_state,
+    load_recent_snapshots,
+)
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
 
 
@@ -66,6 +73,10 @@ def main() -> None:
     summary = store.dataset_summary(series_ticker=series_ticker, reference_time=datetime.now(timezone.utc))
     recent_snapshots = load_recent_snapshots(store, series_ticker=series_ticker, lookback_hours=lookback_hours)
     latest_snapshot_table = build_latest_snapshot_table(recent_snapshots)
+    paper_state = load_paper_trading_state(str(settings.paper["ledger_path"]))
+    open_positions_table = build_positions_table(paper_state.get("open_positions", []))
+    closed_positions_table = build_positions_table(paper_state.get("closed_positions", []))
+    fills_table = build_fills_table(paper_state.get("fills", []))
     signal_table = build_live_signal_table(
         engine=engine,
         snapshots=recent_snapshots,
@@ -88,6 +99,34 @@ def main() -> None:
     setup_cols[1].metric("Price Band", f'{settings.signal["min_contract_price_cents"]}-{settings.signal["max_contract_price_cents"]}c')
     setup_cols[2].metric("Near Money", f'{settings.signal["max_near_money_bps"]} bps')
     setup_cols[3].metric("Max Minutes To Expiry", settings.collector["max_minutes_to_expiry"])
+
+    st.subheader("Paper Trading State")
+    paper_cols = st.columns(5)
+    paper_cols[0].metric("Realized PnL", paper_state.get("realized_pnl", 0.0))
+    paper_cols[1].metric("Session Notional", paper_state.get("session_notional", 0.0))
+    paper_cols[2].metric("Open Positions", len(paper_state.get("open_positions", [])))
+    paper_cols[3].metric("Closed Positions", len(paper_state.get("closed_positions", [])))
+    paper_cols[4].metric("Ledger Updated", paper_state.get("updated_at") or "-")
+
+    paper_left, paper_right = st.columns(2)
+    with paper_left:
+        st.caption("Open Paper Positions")
+        if open_positions_table.empty:
+            st.info("No open paper positions yet.")
+        else:
+            st.dataframe(open_positions_table, use_container_width=True, hide_index=True)
+    with paper_right:
+        st.caption("Recent Closed Paper Positions")
+        if closed_positions_table.empty:
+            st.info("No closed paper positions yet.")
+        else:
+            st.dataframe(closed_positions_table.tail(20), use_container_width=True, hide_index=True)
+
+    st.caption("Recent Paper Fills")
+    if fills_table.empty:
+        st.info("No paper fills recorded yet.")
+    else:
+        st.dataframe(fills_table.head(30), use_container_width=True, hide_index=True)
 
     left, right = st.columns([1.2, 1.0])
 

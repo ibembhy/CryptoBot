@@ -177,6 +177,47 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertEqual(loaded[0].spot_price, 65050)
         self.assertEqual(loaded[0].direction, "above")
 
+    def test_summary_and_loading_use_effective_expiry_from_metadata(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "snapshot_store_effective_expiry_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        store = SnapshotStore(db_path)
+        snapshot = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-WRONG-EXPIRY",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 3, 31, 14, 0, tzinfo=timezone.utc),
+            expiry=datetime(2026, 4, 7, 21, 0, tzinfo=timezone.utc),
+            spot_price=68000,
+            threshold=69000,
+            direction="above",
+            yes_bid=0.44,
+            yes_ask=0.45,
+            settlement_price=1.0,
+            metadata={
+                "close_time": "2026-03-31T15:00:00Z",
+                "expiration_time": "2026-04-07T21:00:00Z",
+            },
+        )
+        store.insert_snapshot(snapshot)
+        summary = store.dataset_summary(
+            series_ticker="KXBTCD",
+            reference_time=datetime(2026, 3, 31, 16, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(summary["expired_markets"], 1)
+        self.assertEqual(summary["replay_ready_markets"], 1)
+        loaded = store.load_snapshots(
+            series_ticker="KXBTCD",
+            replay_ready_only=True,
+            reference_time=datetime(2026, 3, 31, 16, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].expiry, datetime(2026, 3, 31, 15, 0, tzinfo=timezone.utc))
+
 
 if __name__ == "__main__":
     unittest.main()

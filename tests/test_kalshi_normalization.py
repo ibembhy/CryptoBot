@@ -78,6 +78,23 @@ class KalshiNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.direction, "above")
 
+    def test_active_market_prefers_close_time_over_later_expiration_time(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTCD",
+                "ticker": "KXBTCD-26MAR3117-T68999.99",
+                "contract_type": "threshold",
+                "close_time": "2026-03-31T21:00:00Z",
+                "expected_expiration_time": "2026-03-31T21:05:00Z",
+                "expiration_time": "2026-04-07T21:00:00Z",
+                "subtitle": "$69,000 or above",
+                "yes_sub_title": "$69,000 or above",
+            },
+            spot_price=68500,
+            observed_at=datetime(2026, 3, 31, 20, 45, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.expiry, datetime(2026, 3, 31, 21, 0, tzinfo=timezone.utc))
+
 
 if __name__ == "__main__":
     unittest.main()

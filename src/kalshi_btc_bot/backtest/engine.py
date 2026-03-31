@@ -137,6 +137,41 @@ class BacktestEngine:
             per_market_rows.append(reasons)
         return ReplayDiagnostics(summary=totals, per_market=pd.DataFrame(per_market_rows), reason_counts=dict(reason_counts))
 
+    def evaluate_snapshot(self, snapshot: MarketSnapshot, feature_frame: pd.DataFrame):
+        volatility = self._lookup_volatility(feature_frame, snapshot.observed_at)
+        if volatility is None:
+            return None, None
+        snapshot.metadata["volatility"] = volatility
+        snapshot.metadata["recent_log_return"] = self._lookup_recent_log_return(feature_frame, snapshot.observed_at)
+        return self._build_signal(snapshot, volatility)
+
+    def evaluate_live_exit(
+        self,
+        *,
+        snapshot: MarketSnapshot,
+        side: str,
+        entry_price_cents: int,
+        contracts: int,
+        feature_frame: pd.DataFrame,
+    ):
+        volatility = self._lookup_volatility(feature_frame, snapshot.observed_at)
+        if volatility is None:
+            return None
+        snapshot.metadata["volatility"] = volatility
+        snapshot.metadata["recent_log_return"] = self._lookup_recent_log_return(feature_frame, snapshot.observed_at)
+        estimate = self.model.estimate(snapshot, volatility)
+        fair_value = probability_to_cents(estimate.probability if side == "yes" else 1.0 - estimate.probability)
+        return evaluate_exit(
+            snapshot=snapshot,
+            side=side,
+            entry_price_cents=entry_price_cents,
+            contracts=contracts,
+            fair_value_cents=fair_value,
+            model_probability=estimate.probability if side == "yes" else 1.0 - estimate.probability,
+            config=self.exit_config,
+            as_of=snapshot.observed_at,
+        )
+
     def run_strategy(self, mode: str, snapshots: list[MarketSnapshot], feature_frame: pd.DataFrame) -> BacktestResult:
         if not snapshots:
             empty = pd.DataFrame()
