@@ -517,13 +517,15 @@ def _real_exit_executions(
         )
         if decision is None or decision.action != "exit" or decision.exit_price_cents is None or decision.trigger is None:
             continue
+        # Sell 1¢ below bid to ensure front-of-queue exit fill
+        exit_price_cents = max(int(decision.exit_price_cents) - 1, 1)
         request = RealOrderRequest(
             market_ticker=str(position_view["market_ticker"]),
             side=str(position_view["side"]),
             action="sell",
             count=int(position_view["contracts"]),
-            yes_price_cents=int(decision.exit_price_cents) if str(position_view["side"]) == "yes" else None,
-            no_price_cents=int(decision.exit_price_cents) if str(position_view["side"]) == "no" else None,
+            yes_price_cents=exit_price_cents if str(position_view["side"]) == "yes" else None,
+            no_price_cents=exit_price_cents if str(position_view["side"]) == "no" else None,
             client_order_id=f"cryptobot-exit-{str(position_view['market_ticker']).lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
         )
         execution = executor.submit_order(request)
@@ -1231,8 +1233,10 @@ def main() -> None:
                         "observed_at": datetime.now(timezone.utc).isoformat(),
                     }
                 else:
+                    # Filter candidates against real open positions
+                    real_open_tickers = {v["market_ticker"] for v in executor.open_position_views()}
                     preview = asyncio.run(trader.preview_once())
-                    top_candidates = list(preview.get("top_candidates", []) or [])
+                    top_candidates = [c for c in (preview.get("top_candidates", []) or []) if c.get("market_ticker") not in real_open_tickers]
                     if not top_candidates:
                         result = {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping, "exit_executions": exit_executions}
                     else:
