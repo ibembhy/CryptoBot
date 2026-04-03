@@ -207,7 +207,7 @@ class RealOrderExecutor:
                         had_changes = True
 
             if order_fills:
-                fill_count = sum(int(self._extract_numeric(fill, ("count", "quantity", "filled_count")) or 0) for fill in order_fills)
+                fill_count = sum(int(self._extract_numeric(fill, ("count", "quantity", "filled_count", "count_fp")) or 0) for fill in order_fills)
                 avg_fill_price = self._average_fill_price(order_fills)
                 latest_fill_at = max(str(fill.get("created_time", fill.get("ts", fill.get("timestamp", ""))) or "") for fill in order_fills)
                 if entry.get("fill_count") != fill_count:
@@ -352,17 +352,22 @@ class RealOrderExecutor:
             "same_market_resting_orders": len(same_market_resting),
             "same_market_open_positions": len(same_market_positions),
             "dry_run": self.config.dry_run,
+            "action": request.action,
         }
-        if self.config.max_daily_orders > 0 and len(todays_entries) >= self.config.max_daily_orders:
+        is_entry = str(request.action).lower() == "buy"
+        is_exit = str(request.action).lower() == "sell"
+        if is_entry and self.config.max_daily_orders > 0 and len(todays_entries) >= self.config.max_daily_orders:
             return RealPreflightResult(False, "Daily real-order cap reached.", context)
-        if self.config.max_open_orders > 0 and len(resting_orders) >= self.config.max_open_orders:
+        if is_entry and self.config.max_open_orders > 0 and len(resting_orders) >= self.config.max_open_orders:
             return RealPreflightResult(False, "Open resting-order cap reached.", context)
-        if self.config.max_open_positions > 0 and len(open_positions) >= self.config.max_open_positions:
+        if is_entry and self.config.max_open_positions > 0 and len(open_positions) >= self.config.max_open_positions:
             return RealPreflightResult(False, "Open position cap reached on exchange.", context)
         if same_market_resting:
             return RealPreflightResult(False, "Existing resting order already on this market.", context)
-        if same_market_positions:
+        if is_entry and same_market_positions:
             return RealPreflightResult(False, "Existing exchange position already open on this market.", context)
+        if is_exit and not same_market_positions:
+            return RealPreflightResult(False, "No exchange position is open on this market to exit.", context)
         return RealPreflightResult(True, "allowed", context)
 
     def fetch_exchange_state(self, *, order_limit: int = 200, fill_limit: int = 200) -> dict[str, Any]:
@@ -421,6 +426,48 @@ class RealOrderExecutor:
         existing = self._read_ledger()
         existing.append(entry)
         write_json_atomic(self.ledger_path, existing)
+
+    def open_position_views(self) -> list[dict[str, Any]]:
+        self.reconcile_exchange_state()
+        entries = self._read_ledger()
+        latest_by_market: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            market_ticker = str(entry.get("request", {}).get("ticker", "") or "")
+            if not market_ticker or not bool(entry.get("has_open_position", False)):
+                continue
+            recorded_at = self._parse_iso_timestamp(entry.get("recorded_at"))
+            previous = latest_by_market.get(market_ticker)
+            previous_ts = self._parse_iso_timestamp(previous.get("recorded_at")) if previous else None
+            if previous is None or (recorded_at is not None and (previous_ts is None or recorded_at >= previous_ts)):
+                latest_by_market[market_ticker] = entry
+
+        views: list[dict[str, Any]] = []
+        for market_ticker, entry in latest_by_market.items():
+            request = entry.get("request", {}) if isinstance(entry.get("request"), dict) else {}
+            exchange_position = entry.get("exchange_position", {}) if isinstance(entry.get("exchange_position"), dict) else {}
+            side = str(request.get("side") or "").lower()
+            count = int(round(abs(float(entry.get("exchange_position_count") or self._extract_position_count(exchange_position) or 0.0))))
+            if not market_ticker or not side or count <= 0:
+                continue
+            avg_fill_price_cents = entry.get("avg_fill_price_cents")
+            if avg_fill_price_cents in (None, ""):
+                avg_fill_price_cents = request.get("yes_price") if side == "yes" else request.get("no_price")
+            try:
+                entry_price_cents = int(round(float(avg_fill_price_cents)))
+            except (TypeError, ValueError):
+                continue
+            views.append(
+                {
+                    "market_ticker": market_ticker,
+                    "side": side,
+                    "contracts": count,
+                    "entry_price_cents": entry_price_cents,
+                    "entry_recorded_at": entry.get("recorded_at"),
+                    "source_order_id": entry.get("order_id"),
+                    "exchange_position": exchange_position,
+                }
+            )
+        return views
 
     def _read_ledger(self) -> list[dict[str, Any]]:
         return list(
@@ -528,8 +575,18 @@ class RealOrderExecutor:
         weighted_total = 0.0
         total_count = 0
         for fill in fills:
+            # Try cents fields first, then dollar fields (multiply by 100)
             price = RealOrderExecutor._extract_numeric(fill, ("yes_price", "no_price", "price", "price_cents"))
-            count = RealOrderExecutor._extract_numeric(fill, ("count", "quantity", "filled_count"))
+            if price is None:
+                for key in ("yes_price_dollars", "no_price_dollars", "price_dollars"):
+                    raw = fill.get(key)
+                    if raw not in (None, ""):
+                        try:
+                            price = int(round(float(raw) * 100.0))
+                            break
+                        except (TypeError, ValueError):
+                            continue
+            count = RealOrderExecutor._extract_numeric(fill, ("count", "quantity", "filled_count", "count_fp"))
             if price is None or count is None or count <= 0:
                 continue
             weighted_total += float(price) * float(count)
