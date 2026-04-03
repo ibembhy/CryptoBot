@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 import time
 from dataclasses import replace
@@ -482,19 +483,7 @@ def paper_series_value(settings, series_ticker: str, key: str, default: Any) -> 
     return settings.paper.get(key, default)
 
 
-def execute_real_trade_once(settings, args) -> dict[str, Any]:
-    series_ticker = configured_real_series(settings, explicit_series=getattr(args, "series", None))
-    executor = build_real_executor(settings, live=bool(args.live), series_ticker=series_ticker)
-    housekeeping = executor.cancel_stale_orders()
-    if bool(settings.real.get("skip_cycle_after_cancel", True)) and int(housekeeping.get("cancelled_count", 0)) > 0:
-        return {
-            "status": "skipped_after_cancel",
-            "series_ticker": series_ticker,
-            "reason": "Cancelled stale real order(s); skipping new entry this cycle.",
-            "housekeeping": housekeeping,
-            "observed_at": datetime.now(timezone.utc).isoformat(),
-        }
-    trader = build_live_paper_trader(settings)
+def _configure_live_trader_for_args(trader: LivePaperTrader, args) -> None:
     if args.series:
         trader.collector.config.series_ticker = args.series
         trader.collector.config.series_tickers = [args.series]
@@ -503,10 +492,84 @@ def execute_real_trade_once(settings, args) -> dict[str, Any]:
     if args.min_minutes_to_expiry is not None:
         trader.collector.config.min_minutes_to_expiry = args.min_minutes_to_expiry
 
+
+def _real_exit_executions(
+    *,
+    trader: LivePaperTrader,
+    executor: RealOrderExecutor,
+    snapshots,
+    feature_frame,
+) -> list[dict[str, Any]]:
+    latest_by_market = {snapshot.market_ticker: snapshot for snapshot in snapshots}
+    executions: list[dict[str, Any]] = []
+    for position_view in executor.open_position_views():
+        snapshot = latest_by_market.get(position_view["market_ticker"]) or trader.snapshot_store.latest_snapshot_for_market(position_view["market_ticker"])
+        if snapshot is None:
+            continue
+        if snapshot.settlement_price is not None or snapshot.observed_at >= snapshot.expiry:
+            continue
+        decision = trader.engine.evaluate_live_exit(
+            snapshot=snapshot,
+            side=str(position_view["side"]),
+            entry_price_cents=int(position_view["entry_price_cents"]),
+            contracts=int(position_view["contracts"]),
+            feature_frame=feature_frame,
+        )
+        if decision is None or decision.action != "exit" or decision.exit_price_cents is None or decision.trigger is None:
+            continue
+        request = RealOrderRequest(
+            market_ticker=str(position_view["market_ticker"]),
+            side=str(position_view["side"]),
+            action="sell",
+            count=int(position_view["contracts"]),
+            yes_price_cents=int(decision.exit_price_cents) if str(position_view["side"]) == "yes" else None,
+            no_price_cents=int(decision.exit_price_cents) if str(position_view["side"]) == "no" else None,
+            client_order_id=f"cryptobot-exit-{str(position_view['market_ticker']).lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
+        )
+        execution = executor.submit_order(request)
+        executions.append(
+            {
+                "market_ticker": position_view["market_ticker"],
+                "side": position_view["side"],
+                "contracts": position_view["contracts"],
+                "entry_price_cents": position_view["entry_price_cents"],
+                "exit_trigger": decision.trigger,
+                "exit_price_cents": decision.exit_price_cents,
+                "reason": decision.reason,
+                "request": request.to_api_payload(),
+                "execution": execution,
+            }
+        )
+    return executions
+
+
+def execute_real_trade_once(settings, args) -> dict[str, Any]:
+    series_ticker = configured_real_series(settings, explicit_series=getattr(args, "series", None))
+    executor = build_real_executor(settings, live=bool(args.live), series_ticker=series_ticker)
+    housekeeping = executor.cancel_stale_orders()
+    trader = build_live_paper_trader(settings)
+    _configure_live_trader_for_args(trader, args)
+    snapshots = asyncio.run(trader.collector.reconcile_once())
+    feature_frame = trader._build_feature_frame()
+    exit_executions = _real_exit_executions(
+        trader=trader,
+        executor=executor,
+        snapshots=snapshots,
+        feature_frame=feature_frame,
+    )
+    if bool(settings.real.get("skip_cycle_after_cancel", True)) and int(housekeeping.get("cancelled_count", 0)) > 0:
+        return {
+            "status": "skipped_after_cancel",
+            "series_ticker": series_ticker,
+            "reason": "Cancelled stale real order(s); skipping new entry this cycle.",
+            "housekeeping": housekeeping,
+            "exit_executions": exit_executions,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
     preview = asyncio.run(trader.preview_once())
     top_candidates = list(preview.get("top_candidates", []) or [])
     if not top_candidates:
-        return {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping}
+        return {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping, "exit_executions": exit_executions}
 
     top = top_candidates[0]
     side = str(top["side"])
@@ -526,6 +589,7 @@ def execute_real_trade_once(settings, args) -> dict[str, Any]:
         "selected_order": request.to_api_payload(),
         "execution": result,
         "housekeeping": housekeeping,
+        "exit_executions": exit_executions,
     }
 
 
@@ -1149,39 +1213,56 @@ def main() -> None:
             _current_market_ticker: str | None = None
             try:
                 housekeeping = executor.cancel_stale_orders()
+                snapshots = asyncio.run(trader.collector.reconcile_once())
+                feature_frame = trader._build_feature_frame()
+                exit_executions = _real_exit_executions(
+                    trader=trader,
+                    executor=executor,
+                    snapshots=snapshots,
+                    feature_frame=feature_frame,
+                )
                 if bool(settings.real.get("skip_cycle_after_cancel", True)) and int(housekeeping.get("cancelled_count", 0)) > 0:
                     result = {
                         "status": "skipped_after_cancel",
                         "series_ticker": series_ticker,
                         "reason": "Cancelled stale real order(s); skipping new entry this cycle.",
                         "housekeeping": housekeeping,
+                        "exit_executions": exit_executions,
                         "observed_at": datetime.now(timezone.utc).isoformat(),
                     }
                 else:
                     preview = asyncio.run(trader.preview_once())
                     top_candidates = list(preview.get("top_candidates", []) or [])
                     if not top_candidates:
-                        result = {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping}
+                        result = {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping, "exit_executions": exit_executions}
                     else:
                         executions = []
                         try:
                             balance_cents = int(executor.kalshi_client.get_balance().get("balance", 0))
+                            current_equity = balance_cents / 100.0
                         except Exception:
-                            balance_cents = None
+                            current_equity = float(trader.config.bankroll_fraction_per_trade)
                         for top in top_candidates:
                             _current_market_ticker = str(top["market_ticker"])
                             side = str(top["side"])
                             market_ticker = str(top["market_ticker"])
                             entry_price_cents = int(top["entry_price_cents"]) if top.get("entry_price_cents") is not None else 50
-                            max_notional = float(settings.real.get("max_trade_notional", 10.0))
-                            bankroll_fraction = float(settings.real.get("bankroll_fraction_per_trade", 0.5))
-                            if balance_cents is not None:
-                                dynamic_notional = (balance_cents / 100.0) * bankroll_fraction
-                                max_notional = min(max_notional, dynamic_notional)
+                            # Mirror paper sizing exactly
                             size_multiplier = max(float(top.get("size_multiplier") or 1.0), 0.0)
-                            max_notional *= size_multiplier
-                            max_notional = max(max_notional, entry_price_cents / 100.0)
-                            count = max(1, int(max_notional / (entry_price_cents / 100.0)))
+                            base_contracts = max(int(trader.engine.backtest_config.default_contracts), 1)
+                            max_contracts = base_contracts
+                            if trader.config.enable_bankroll_sizing:
+                                max_contracts = max(int(trader.config.max_contracts_per_trade), base_contracts)
+                                if trader.config.respect_tier_size_multiplier:
+                                    max_contracts = max(base_contracts, int(math.floor(max_contracts * size_multiplier)))
+                            available_equity = max(current_equity - float(trader.config.min_cash_buffer), 0.0)
+                            sizing_budget = available_equity * float(trader.config.bankroll_fraction_per_trade) if trader.config.enable_bankroll_sizing else available_equity
+                            count = base_contracts
+                            for c in range(max_contracts, 0, -1):
+                                notional = (entry_price_cents * c) / 100.0
+                                if not trader.config.enable_bankroll_sizing or notional <= sizing_budget:
+                                    count = c
+                                    break
                             request = RealOrderRequest(
                                 market_ticker=market_ticker,
                                 side=side,
@@ -1196,7 +1277,7 @@ def main() -> None:
                             exec_status = str(execution.get("exchange_status", execution.get("status", "")))
                             if exec_status in ("blocked",):
                                 break
-                        result = {**preview, "series_ticker": series_ticker, "executions": executions, "housekeeping": housekeeping}
+                        result = {**preview, "series_ticker": series_ticker, "executions": executions, "housekeeping": housekeeping, "exit_executions": exit_executions}
                 print(json.dumps(result, indent=2, default=str))
             except KeyboardInterrupt:
                 _log.info("Real trader stopped by user.")
