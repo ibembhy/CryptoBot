@@ -206,8 +206,8 @@ max_open_positions = 3
 max_trade_notional = 50.0
 bankroll_fraction_per_trade = 0.2
 max_daily_loss = 10.0
-stale_order_timeout_seconds = 60
-skip_cycle_after_cancel = true
+stale_order_timeout_seconds = 10
+skip_cycle_after_cancel = false
 
 [real.series_ledger_paths]
 KXBTCD = "data/real_trading_ledger_kxbtcd.json"
