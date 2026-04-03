@@ -1263,13 +1263,15 @@ def main() -> None:
                                 if not trader.config.enable_bankroll_sizing or notional <= sizing_budget:
                                     count = c
                                     break
+                            # Bid 1¢ above ask to ensure front-of-queue fill
+                            bid_price_cents = min(entry_price_cents + 1, 99)
                             request = RealOrderRequest(
                                 market_ticker=market_ticker,
                                 side=side,
                                 action="buy",
                                 count=count,
-                                yes_price_cents=entry_price_cents if side == "yes" else None,
-                                no_price_cents=entry_price_cents if side == "no" else None,
+                                yes_price_cents=bid_price_cents if side == "yes" else None,
+                                no_price_cents=bid_price_cents if side == "no" else None,
                                 client_order_id=f"cryptobot-{market_ticker.lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
                             )
                             execution = executor.submit_order(request)
