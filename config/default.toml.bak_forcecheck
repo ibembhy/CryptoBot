@@ -1,0 +1,236 @@
+[app]
+underlying_symbol = "BTC-USD"
+timezone = "UTC"
+
+[kalshi]
+api_key_id = ""
+private_key_path = ""
+websocket_path = "/trade-api/ws/v2"
+
+[data]
+coinbase_product_id = "BTC-USD"
+kraken_pair = "XBTUSD"
+market_data_primary = "coinbase"
+market_data_fallbacks = ["kraken"]
+base_timeframe = "1m"
+resample_timeframe = "5min"
+volatility_window = 20
+annualization_factor = 105120.0
+coinbase_verify_ssl = true
+
+[model]
+name = "hybrid"
+drift = 0.0
+volatility_floor = 0.05
+repricing_persistence_factor = 0.75
+repricing_min_move_bps = 3.0
+repricing_max_move_bps = 100.0
+
+[repricing_target]
+horizon_minutes = 5
+min_samples = 150
+min_regime_samples = 75
+ridge_lambda = 5.0
+max_abs_target_cents = 25.0
+cache_path = "data/repricing_target_profile.json"
+max_probability_shift = 0.2
+near_money_regime_bps = 150.0
+high_vol_regime_threshold = 0.8
+profit_cost_cents = 2.0
+
+[signal]
+min_edge = 0.05
+min_confidence = 0.0
+min_contract_price_cents = 25
+max_contract_price_cents = 60
+max_near_money_bps = 150.0
+min_liquidity = 0.0
+uncertainty_penalty = 0.03
+max_spread_cents = 6
+liquidity_penalty_per_100_volume = 0.002
+max_data_age_seconds = 120
+
+[signal_tiers.KXBTCD]
+allowed_sides = ["yes"]
+preferred_price_min_cents = 45
+preferred_price_max_cents = 55
+secondary_price_min_cents = 35
+secondary_price_max_cents = 45
+soft_price_max_cents = 60
+preferred_minutes_min = 15
+preferred_minutes_max = 30
+soft_minutes_min = 10
+disable_tier_d = true
+tier_a_size_multiplier = 1.0
+tier_a_quality_bonus = 0.75
+tier_b_size_multiplier = 0.7
+tier_b_quality_bonus = 0.35
+tier_c_size_multiplier = 0.4
+tier_c_quality_bonus = -0.1
+tier_d_size_multiplier = 0.1
+tier_d_quality_bonus = -0.75
+
+[signal_tiers.KXBTC15M]
+allowed_sides = ["yes"]
+preferred_price_min_cents = 45
+preferred_price_max_cents = 55
+secondary_price_min_cents = 35
+secondary_price_max_cents = 45
+soft_price_max_cents = 60
+preferred_minutes_min = 10
+preferred_minutes_max = 15
+soft_minutes_min = 5
+disable_tier_d = true
+tier_a_size_multiplier = 1.0
+tier_a_quality_bonus = 0.75
+tier_b_size_multiplier = 0.7
+tier_b_quality_bonus = 0.35
+tier_c_size_multiplier = 0.4
+tier_c_quality_bonus = -0.1
+tier_d_size_multiplier = 0.1
+tier_d_quality_bonus = -0.75
+
+[calibration]
+enabled = true
+bucket_width = 0.05
+min_samples = 50
+min_bucket_count = 3
+
+[calibration_cache]
+enabled = true
+path = "data/calibration_cache.json"
+
+[strategy]
+mode = "hybrid"
+primary_model = "gbm_threshold"
+confirm_model = "latency_repricing"
+ranking_support_model = "repricing_target"
+ranking_support_weight = 0.35
+primary_weight = 0.65
+confirm_weight = 0.35
+require_side_agreement = true
+min_combined_edge = 0.04
+allow_primary_unconfirmed = false
+
+[risk]
+max_trade_notional = 25.0
+max_session_notional = 10000.0
+max_open_positions = 3
+max_positions_per_expiry = 2
+max_daily_loss = 25.0
+max_drawdown = 60.0
+
+[trading]
+default_contracts = 1
+take_profit_cents = 8
+stop_loss_cents = 15
+fair_value_buffer_cents = 3
+time_exit_minutes_before_expiry = 5
+min_hold_edge = 0.02
+min_ev_to_hold_cents = 2
+exit_liquidity_floor = 0.0
+
+[backtest]
+entry_slippage_cents = 1
+exit_slippage_cents = 1
+fee_rate_bps = 0.0
+starting_bankroll = 1000.0
+allow_reentry = false
+
+[collector]
+series_ticker = "KXBTCD"
+series_tickers = ["KXBTCD", "KXBTC15M"]
+status = "open"
+market_limit = 200
+min_minutes_to_expiry = 0
+max_minutes_to_expiry = 35
+reconcile_interval_seconds = 60
+spot_refresh_interval_seconds = 3
+websocket_channels = ["ticker"]
+sqlite_path = "data/kalshi_btc_snapshots.sqlite3"
+read_sqlite_path = "data/kalshi_btc_snapshots_read.sqlite3"
+postgres_dsn = "postgresql://cryptobot:cryptobot_secure_2024@localhost/cryptobot_snapshots"
+replica_sync_interval_seconds = 5
+backfill_period_interval = 1
+backfill_batch_size = 100
+backfill_historical_pages = 5
+settlement_recent_hours = 48
+
+[paper]
+feature_history_hours = 6
+poll_interval_seconds = 10
+feature_cache_refresh_seconds = 15
+ledger_path = "data/paper_trading_state.json"
+series_ticker = "KXBTCD"
+starting_capital = 100.0
+enable_bankroll_sizing = false
+bankroll_fraction_per_trade = 1.0
+min_cash_buffer = 0.0
+max_contracts_per_trade = 1
+respect_tier_size_multiplier = true
+settlement_check_interval_seconds = 300
+settlement_recent_hours = 72
+settlement_max_markets_per_cycle = 10
+refresh_calibrators_on_settlement = false
+
+[paper.series_ledgers]
+KXBTCD = "data/paper_trading_state.json"
+KXBTC15M = "data/paper_trading_state_kxbtc15m.json"
+
+[paper.series_starting_capitals]
+KXBTCD = 100.0
+KXBTC15M = 100.0
+
+[paper.series_enable_bankroll_sizing]
+KXBTCD = true
+KXBTC15M = true
+
+[paper.series_bankroll_fraction_per_trade]
+KXBTCD = 0.2
+KXBTC15M = 0.2
+
+[paper.series_min_cash_buffer]
+KXBTCD = 0.0
+KXBTC15M = 0.0
+
+[paper.series_max_contracts_per_trade]
+KXBTCD = 50
+KXBTC15M = 50
+
+[real]
+ledger_path = "data/real_trading_ledger.json"
+kill_switch_path = "data/real_trading_kill_switch.json"
+max_daily_orders = 0
+max_open_orders = 2
+max_open_positions = 2
+max_trade_notional = 5.0
+bankroll_fraction_per_trade = 0.2
+max_daily_loss = 10.0
+stale_order_timeout_seconds = 10
+replace_order_timeout_seconds = 12
+cancel_order_timeout_seconds = 45
+keep_competitive_order_timeout_seconds = 60
+max_replace_attempts = 2
+max_chase_cents = 3
+skip_cycle_after_cancel = false
+cycle_spend_fraction = 0.20
+max_daily_loss_fraction = 0.20
+
+[real.series_ledger_paths]
+KXBTCD = "data/real_trading_ledger_kxbtcd.json"
+KXBTC15M = "data/real_trading_ledger_kxbtc15m.json"
+
+[real.series_live_ledger_paths]
+KXBTCD = "data/real_trading_live_ledger_kxbtcd.json"
+KXBTC15M = "data/real_trading_live_ledger_kxbtc15m.json"
+
+[real.series_kill_switch_paths]
+KXBTCD = "data/real_trading_kill_switch_kxbtcd.json"
+KXBTC15M = "data/real_trading_kill_switch_kxbtc15m.json"
+
+[replay_cache]
+enabled = true
+directory = "data/replay_cache"
+
+[reporting]
+sensitivity_vol_multipliers = [0.75, 1.0, 1.25]

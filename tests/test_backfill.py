@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from kalshi_btc_bot.collectors.backfill import BackfillConfig, CandlestickBackfillService
+from kalshi_btc_bot.cli import list_historical_markets_for_window
 from kalshi_btc_bot.data.coinbase import CoinbaseClient
 from kalshi_btc_bot.markets.kalshi import KalshiClient
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
@@ -44,6 +45,21 @@ class FakeKalshiBackfillClient(KalshiClient):
         self.batch_raises = batch_raises
 
     def list_markets(self, **kwargs):
+        if kwargs.get("event_ticker") == "KXBTC15M-26MAR311645":
+            if kwargs.get("series_ticker") not in (None, ""):
+                return []
+            return [
+                {
+                    "series_ticker": "KXBTC15M",
+                    "ticker": "KXBTC15M-26MAR311645-45",
+                    "contract_type": "threshold",
+                    "close_time": "2026-03-31T20:45:00Z",
+                    "floor_strike": 67947.91,
+                    "title": "BTC price up in next 15 mins?",
+                    "yes_sub_title": "Target Price: $67,947.91",
+                    "status": "finalized",
+                }
+            ]
         if kwargs.get("event_ticker") == "KXBTCD-26MAR3018":
             return [
                 {
@@ -138,6 +154,18 @@ class FakeKalshiBackfillClient(KalshiClient):
         }
 
     def list_events(self, **kwargs):
+        if kwargs.get("series_ticker") == "KXBTC15M":
+            return {
+                "events": [
+                    {
+                        "event_ticker": "KXBTC15M-26MAR311645",
+                        "strike_date": "2026-03-31T20:45:00Z",
+                        "title": "BTC 15 min · $67,947.91 target",
+                        "sub_title": "Mar 31 - 4:30PM EDT to 4:45PM EDT",
+                    }
+                ],
+                "cursor": None,
+            }
         return {
             "events": [
                 {
@@ -211,6 +239,42 @@ class BackfillTests(unittest.TestCase):
         )
         snapshots = service.backfill()
         self.assertEqual(len(snapshots), 1)
+
+    def test_historical_backfill_uses_live_settled_route_for_kxbtc15m(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "backfill_kxbtc15m_historical_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        service = CandlestickBackfillService(
+            kalshi_client=FakeKalshiBackfillClient(),
+            coinbase_client=FakeCoinbaseClient(68000),
+            snapshot_store=SnapshotStore(db_path),
+            config=BackfillConfig(
+                series_ticker="KXBTC15M",
+                start_ts=1774989000,
+                end_ts=1774990800,
+                use_historical_markets=True,
+            ),
+        )
+        snapshots = service.backfill()
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].series_ticker, "KXBTC15M")
+        self.assertEqual(snapshots[0].market_ticker, "KXBTC15M-26MAR311645-45")
+
+    def test_historical_market_listing_supports_kxbtc15m_live_settled_route(self):
+        result = list_historical_markets_for_window(
+            kalshi=FakeKalshiBackfillClient(),
+            series_ticker="KXBTC15M",
+            start_ts=1774989000,
+            end_ts=1774990800,
+            max_events=10,
+            max_markets=10,
+        )
+        self.assertEqual(result["matched_event_count"], 1)
+        self.assertEqual(result["matched_market_count"], 1)
+        self.assertEqual(result["markets"][0]["market_ticker"], "KXBTC15M-26MAR311645-45")
+        self.assertEqual(result["markets"][0]["route"], "live")
 
 
 if __name__ == "__main__":

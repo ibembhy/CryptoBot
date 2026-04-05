@@ -1,0 +1,2 @@
+[console_scripts]
+kalshi-btc-bot = kalshi_btc_bot.cli:main

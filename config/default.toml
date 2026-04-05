@@ -43,7 +43,7 @@ min_edge = 0.05
 min_confidence = 0.0
 min_contract_price_cents = 25
 max_contract_price_cents = 70
-max_near_money_bps = 200.0
+max_near_money_bps = 5000.0
 min_liquidity = 0.0
 uncertainty_penalty = 0.03
 max_spread_cents = 8
@@ -51,7 +51,7 @@ liquidity_penalty_per_100_volume = 0.002
 max_data_age_seconds = 120
 
 [signal_tiers.KXBTCD]
-allowed_sides = ["yes"]
+allowed_sides = ["yes", "no"]
 preferred_price_min_cents = 40
 preferred_price_max_cents = 60
 secondary_price_min_cents = 30
@@ -71,7 +71,7 @@ tier_d_size_multiplier = 0.15
 tier_d_quality_bonus = -0.3
 
 [signal_tiers.KXBTC15M]
-allowed_sides = ["yes"]
+allowed_sides = ["yes", "no"]
 preferred_price_min_cents = 40
 preferred_price_max_cents = 60
 secondary_price_min_cents = 30
@@ -89,6 +89,9 @@ tier_c_size_multiplier = 0.4
 tier_c_quality_bonus = -0.1
 tier_d_size_multiplier = 0.15
 tier_d_quality_bonus = -0.3
+min_edge = 0.12
+disable_stop_loss = true
+disable_early_exits = true
 
 [calibration]
 enabled = true
@@ -187,7 +190,7 @@ KXBTC15M = true
 
 [paper.series_bankroll_fraction_per_trade]
 KXBTCD = 0.2
-KXBTC15M = 0.2
+KXBTC15M = 0.05
 
 [paper.series_min_cash_buffer]
 KXBTCD = 0.0
@@ -195,7 +198,7 @@ KXBTC15M = 0.0
 
 [paper.series_max_contracts_per_trade]
 KXBTCD = 50
-KXBTC15M = 50
+KXBTC15M = 3
 
 [real]
 ledger_path = "data/real_trading_ledger.json"
@@ -204,10 +207,15 @@ max_daily_orders = 0
 max_open_orders = 2
 max_open_positions = 2
 max_trade_notional = 0.0
-max_total_open_notional = 12.0
-max_notional_per_market = 12.0
-max_notional_per_expiry = 12.0
-max_same_side_notional_per_expiry = 12.0
+max_total_open_notional = 0.0
+max_notional_per_market = 0.0
+max_notional_per_expiry = 0.0
+max_same_side_notional_per_expiry = 0.0
+max_trade_notional_fraction = 0.0
+max_total_open_notional_fraction = 0.45
+max_notional_per_market_fraction = 0.35
+max_notional_per_expiry_fraction = 0.45
+max_same_side_notional_per_expiry_fraction = 0.45
 bankroll_fraction_per_trade = 0.2
 max_daily_loss = 10.0
 stale_order_timeout_seconds = 10

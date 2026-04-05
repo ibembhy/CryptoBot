@@ -111,6 +111,123 @@ class SignalEngineTests(unittest.TestCase):
         self.assertEqual(signal.action, "no_action")
         self.assertEqual(signal.reason, "Contract is too far from spot.")
 
+    def test_kxbtc15m_prefers_tier_a_and_marks_signal(self):
+        snapshot = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTC15M",
+            market_ticker="KXBTC15M-TEST-A",
+            contract_type="direction",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc),
+            expiry=datetime(2026, 3, 30, 15, 12, tzinfo=timezone.utc),
+            spot_price=64000,
+            threshold=64025,
+            direction="above",
+            yes_ask=0.50,
+            yes_bid=0.48,
+            no_ask=0.52,
+            no_bid=0.50,
+        )
+        estimate = ProbabilityEstimate(
+            model_name="gbm",
+            observed_at=snapshot.observed_at,
+            expiry=snapshot.expiry,
+            spot_price=64000,
+            target_price=64025,
+            volatility=0.8,
+            drift=0.0,
+            probability=0.62,
+        )
+        signal = generate_signal(
+            snapshot,
+            estimate,
+            SignalConfig(
+                0.05,
+                0.0,
+                25,
+                60,
+                uncertainty_penalty=0.0,
+                max_spread_cents=10,
+                max_data_age_seconds=10**9,
+                series_tier_profiles={
+                    "KXBTC15M": {
+                        "allowed_sides": ["yes"],
+                        "preferred_price_min_cents": 45,
+                        "preferred_price_max_cents": 55,
+                        "secondary_price_min_cents": 35,
+                        "secondary_price_max_cents": 45,
+                        "soft_price_max_cents": 60,
+                        "preferred_minutes_min": 10,
+                        "preferred_minutes_max": 15,
+                        "soft_minutes_min": 5,
+                        "disable_tier_d": True,
+                    }
+                },
+            ),
+        )
+        self.assertEqual(signal.action, "buy_yes")
+        self.assertEqual(signal.tier_label, "A")
+        self.assertAlmostEqual(signal.size_multiplier, 1.0, places=3)
+        self.assertIn("Tier A", signal.reason)
+
+    def test_kxbtc15m_disables_experimental_tier_d(self):
+        snapshot = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTC15M",
+            market_ticker="KXBTC15M-TEST-D",
+            contract_type="direction",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc),
+            expiry=datetime(2026, 3, 30, 15, 14, tzinfo=timezone.utc),
+            spot_price=64000,
+            threshold=64025,
+            direction="above",
+            yes_ask=0.30,
+            yes_bid=0.28,
+            no_ask=0.72,
+            no_bid=0.70,
+        )
+        estimate = ProbabilityEstimate(
+            model_name="gbm",
+            observed_at=snapshot.observed_at,
+            expiry=snapshot.expiry,
+            spot_price=64000,
+            target_price=64025,
+            volatility=0.8,
+            drift=0.0,
+            probability=0.60,
+        )
+        signal = generate_signal(
+            snapshot,
+            estimate,
+            SignalConfig(
+                0.05,
+                0.0,
+                25,
+                60,
+                uncertainty_penalty=0.0,
+                max_spread_cents=10,
+                max_data_age_seconds=10**9,
+                series_tier_profiles={
+                    "KXBTC15M": {
+                        "allowed_sides": ["yes"],
+                        "preferred_price_min_cents": 45,
+                        "preferred_price_max_cents": 55,
+                        "secondary_price_min_cents": 35,
+                        "secondary_price_max_cents": 45,
+                        "soft_price_max_cents": 60,
+                        "preferred_minutes_min": 10,
+                        "preferred_minutes_max": 15,
+                        "soft_minutes_min": 5,
+                        "disable_tier_d": True,
+                    }
+                },
+            ),
+        )
+        self.assertEqual(signal.action, "no_action")
+        self.assertEqual(signal.tier_label, "D")
+        self.assertIn("experimental", signal.reason.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

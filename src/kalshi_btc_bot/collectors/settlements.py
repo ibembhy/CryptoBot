@@ -7,6 +7,7 @@ import logging
 import requests
 
 from kalshi_btc_bot.markets.kalshi import KalshiClient
+from kalshi_btc_bot.markets.normalize import _settlement_price
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
 
 log = logging.getLogger(__name__)
@@ -86,17 +87,4 @@ class SettlementEnricher:
         return None
 
     def _extract_settlement_price(self, market: dict) -> float | None:
-        settlement_value = _safe_float(market.get("settlement_value_dollars"))
-        if settlement_value is not None:
-            return settlement_value
-
-        yes_settlement = _safe_float(market.get("yes_settlement_value_dollars"))
-        if yes_settlement is not None:
-            return yes_settlement
-
-        result = str(market.get("result") or market.get("market_result") or "").lower()
-        if result == "yes":
-            return 1.0
-        if result == "no":
-            return 0.0
-        return None
+        return _settlement_price(market)

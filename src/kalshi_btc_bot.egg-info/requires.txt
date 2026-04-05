@@ -1,0 +1,12 @@
+cryptography>=45.0.0
+numpy>=2.0.0
+pandas>=2.2.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+websockets>=16.0
+
+[dev]
+pytest>=8.0.0
+
+[ui]
+streamlit>=1.44.0

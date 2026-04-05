@@ -1,0 +1,14 @@
+DB: data/server_snapshots.sqlite3
+Series: KXBTCD, KXBTC15M
+
+[KXBTCD]
+markets_with_no_settlement_match=0
+duplicate_market_timestamp_rows=78,656
+stale_quote_rows_refined=1,916,803
+sources=kalshi
+
+[KXBTC15M]
+markets_with_no_settlement_match=0
+duplicate_market_timestamp_rows=5,113
+stale_quote_rows_refined=36,822
+sources=kalshi

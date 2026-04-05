@@ -247,6 +247,43 @@ class SnapshotStoreTests(unittest.TestCase):
         self.assertEqual(loaded[0].observed_at, datetime(2026, 3, 31, 16, 0, tzinfo=timezone.utc))
         self.assertEqual(loaded[0].expiry, datetime(2026, 3, 31, 17, 0, tzinfo=timezone.utc))
 
+    def test_load_snapshots_can_return_descending_recent_rows(self):
+        base_dir = Path("test_artifacts")
+        base_dir.mkdir(exist_ok=True)
+        db_path = base_dir / "snapshot_store_descending_test.sqlite3"
+        if db_path.exists():
+            db_path.unlink()
+        store = SnapshotStore(db_path)
+        first = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-A",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 4, 1, 5, 0, tzinfo=timezone.utc),
+            expiry=datetime(2026, 4, 1, 6, 0, tzinfo=timezone.utc),
+            spot_price=68000,
+            threshold=68100,
+            direction="above",
+        )
+        second = MarketSnapshot(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-B",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            observed_at=datetime(2026, 4, 1, 5, 5, tzinfo=timezone.utc),
+            expiry=datetime(2026, 4, 1, 6, 0, tzinfo=timezone.utc),
+            spot_price=68010,
+            threshold=68110,
+            direction="above",
+        )
+        store.insert_snapshot(first)
+        store.insert_snapshot(second)
+        loaded = store.load_snapshots(series_ticker="KXBTCD", limit=1, descending=True)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].market_ticker, "KXBTCD-B")
+
 
 if __name__ == "__main__":
     unittest.main()

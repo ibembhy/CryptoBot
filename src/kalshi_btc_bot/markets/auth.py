@@ -29,6 +29,18 @@ class KalshiAuthSigner:
             "KALSHI-ACCESS-SIGNATURE": signature,
         }
 
+    def request_headers(self, *, method: str, path: str) -> dict[str, str]:
+        normalized_path = path.split("?", 1)[0]
+        if not normalized_path.startswith("/trade-api/"):
+            normalized_path = f"/trade-api/v2{normalized_path if normalized_path.startswith('/') else f'/{normalized_path}'}"
+        timestamp = self._timestamp_ms()
+        signature = self._sign(timestamp=timestamp, method=method, path=normalized_path)
+        return {
+            "KALSHI-ACCESS-KEY": self.config.api_key_id,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp,
+            "KALSHI-ACCESS-SIGNATURE": signature,
+        }
+
     @staticmethod
     def _load_private_key(path: str):
         private_key_bytes = Path(path).expanduser().read_bytes()

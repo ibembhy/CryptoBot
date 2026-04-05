@@ -70,6 +70,50 @@ def build_bucket_breakdown(trades: pd.DataFrame) -> dict[str, list[dict]]:
     return breakdown
 
 
+def build_failure_analysis(
+    model_report: dict,
+    *,
+    strategy_mode: str = "early_exit",
+    top_n: int = 3,
+) -> dict:
+    summary = dict(model_report.get(strategy_mode, {}))
+    buckets = dict(model_report.get("bucket_breakdown", {}).get(strategy_mode, {}))
+    best_buckets: dict[str, list[dict]] = {}
+    worst_buckets: dict[str, list[dict]] = {}
+    for bucket_name, rows in buckets.items():
+        ordered = sorted(rows, key=lambda row: (float(row["pnl"]), float(row["roi"]), int(row["trade_count"])))
+        worst_buckets[bucket_name] = ordered[:top_n]
+        best_buckets[bucket_name] = list(reversed(ordered[-top_n:]))
+
+    primary_leaks = []
+    strongest_pockets = []
+    for bucket_name in ("exit_trigger", "price_band", "edge_band", "side", "hold_band"):
+        for row in worst_buckets.get(bucket_name, []):
+            if float(row["pnl"]) < 0:
+                primary_leaks.append({"bucket": bucket_name, **row})
+        for row in best_buckets.get(bucket_name, []):
+            if float(row["pnl"]) > 0:
+                strongest_pockets.append({"bucket": bucket_name, **row})
+
+    primary_leaks = sorted(
+        primary_leaks,
+        key=lambda row: (float(row["pnl"]), -float(row["roi"]), -int(row["trade_count"])),
+    )[:top_n]
+    strongest_pockets = sorted(
+        strongest_pockets,
+        key=lambda row: (float(row["pnl"]), float(row["roi"]), int(row["trade_count"])),
+        reverse=True,
+    )[:top_n]
+
+    return {
+        "summary": summary,
+        "best_buckets": best_buckets,
+        "worst_buckets": worst_buckets,
+        "primary_leaks": primary_leaks,
+        "strongest_pockets": strongest_pockets,
+    }
+
+
 def filter_snapshots_for_focus(
     snapshots,
     *,

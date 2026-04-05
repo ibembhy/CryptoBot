@@ -1,0 +1,5 @@
+volume_bucket,sample_count,actual_yes_win_rate,avg_yes_ask,avg_yes_bid,avg_spread_cents_yes,avg_volume,yes_edge_actual,market_minus_actual
+0,100105,0.4754407871734679,0.5089453973328005,0.4976030767693921,1.1342320563408421,,-0.03350461015933265,0.03350461015933265
+1-99,0,,,,,,,
+100-999,0,,,,,,,
+1000+,0,,,,,,,

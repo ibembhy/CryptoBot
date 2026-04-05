@@ -87,6 +87,10 @@ class Settings:
     def paper(self) -> dict[str, Any]:
         return self.raw["paper"]
 
+    @property
+    def real(self) -> dict[str, Any]:
+        return self.raw["real"]
+
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
     load_dotenv()

@@ -95,6 +95,27 @@ class KalshiNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.expiry, datetime(2026, 3, 31, 21, 0, tzinfo=timezone.utc))
 
+    def test_kxbtc15m_market_infers_above_direction_from_up_title(self):
+        snapshot = normalize_market(
+            {
+                "series_ticker": "KXBTC15M",
+                "ticker": "KXBTC15M-26APR011645-45",
+                "close_time": "2026-04-01T20:45:00Z",
+                "expected_expiration_time": "2026-04-01T20:50:00Z",
+                "floor_strike": 68051.43,
+                "title": "BTC price up in next 15 mins?",
+                "yes_sub_title": "Target Price: $68,051.43",
+                "yes_ask": 0.54,
+                "yes_bid": 0.52,
+            },
+            spot_price=68058.14,
+            observed_at=datetime(2026, 4, 1, 20, 31, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot.contract_type, "threshold")
+        self.assertEqual(snapshot.threshold, 68051.43)
+        self.assertEqual(snapshot.direction, "above")
+        self.assertEqual(snapshot.expiry, datetime(2026, 4, 1, 20, 45, tzinfo=timezone.utc))
+
 
 if __name__ == "__main__":
     unittest.main()

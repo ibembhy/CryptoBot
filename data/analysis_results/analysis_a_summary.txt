@@ -1,0 +1,13 @@
+Analysis A - Does the model have real edge?
+
+[KXBTCD]
+rows_after_filter=966,233
+avg_yes_ask=0.5069
+actual_yes_rate=0.4994
+avg_yes_edge_actual=-0.0075
+
+[KXBTC15M]
+rows_after_filter=100,105
+avg_yes_ask=0.5089
+actual_yes_rate=0.4754
+avg_yes_edge_actual=-0.0335

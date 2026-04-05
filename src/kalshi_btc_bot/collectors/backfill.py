@@ -268,6 +268,7 @@ class CandlestickBackfillService:
     def _load_event_markets(self, event_ticker: str, *, route: str) -> list[dict]:
         if route == "live":
             return self.kalshi_client.list_markets(
+                series_ticker=None,
                 event_ticker=event_ticker,
                 status="settled",
                 limit=1000,

@@ -8,7 +8,8 @@ import math
 import sqlite3
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine
@@ -38,6 +39,7 @@ from kalshi_btc_bot.reports.comparison import (
     filter_snapshots_for_focus,
 )
 from kalshi_btc_bot.settings import load_settings
+from kalshi_btc_bot.utils.files import read_json_strict, write_json_atomic
 from kalshi_btc_bot.signals.calibration import build_engine_calibrators, load_engine_calibrators, save_engine_calibrators
 from kalshi_btc_bot.signals.fusion import FusionConfig
 from kalshi_btc_bot.signals.engine import SignalConfig
@@ -278,12 +280,26 @@ def configured_collector_series(settings) -> list[str]:
     return [item for item in series if item]
 
 
+def configured_real_series_list(settings) -> list[str]:
+    per_series = settings.real.get("series_live_ledger_paths") or settings.real.get("series_ledger_paths")
+    if isinstance(per_series, dict) and per_series:
+        return [s for s in per_series if s]
+    return configured_collector_series(settings)
+
+
+def snapshot_store_dsn(settings) -> str:
+    dsn = settings.collector.get("postgres_dsn")
+    if not dsn:
+        raise RuntimeError("collector.postgres_dsn must be configured; SQLite snapshot fallback is no longer supported in runtime paths.")
+    return str(dsn)
+
+
 def snapshot_write_path(settings) -> str:
-    return str(settings.collector["sqlite_path"])
+    return snapshot_store_dsn(settings)
 
 
 def snapshot_read_path(settings) -> str:
-    return str(settings.collector.get("read_sqlite_path", settings.collector["sqlite_path"]))
+    return snapshot_store_dsn(settings)
 
 
 def snapshot_replica_interval_seconds(settings) -> int:
@@ -476,7 +492,10 @@ def configured_paper_series(settings, explicit_series: str | None = None) -> str
 
 
 def paper_series_value(settings, series_ticker: str, key: str, default: Any) -> Any:
-    for per_series_key in (f"series_{key}", f"series_{key}s"):
+    aliases = [f"series_{key}", f"series_{key}s"]
+    if key == "ledger_path":
+        aliases.extend(["series_ledgers", "series_ledger_paths"])
+    for per_series_key in aliases:
         per_series = settings.paper.get(per_series_key)
         if isinstance(per_series, dict) and series_ticker in per_series:
             return per_series[series_ticker]
@@ -514,11 +533,11 @@ def _real_exit_executions(
             entry_price_cents=int(position_view["entry_price_cents"]),
             contracts=int(position_view["contracts"]),
             feature_frame=feature_frame,
+            entry_edge=float(position_view.get("entry_edge") or 0.0),
         )
         if decision is None or decision.action != "exit" or decision.exit_price_cents is None or decision.trigger is None:
             continue
-        # Sell 1¢ below bid to ensure front-of-queue exit fill
-        exit_price_cents = max(int(decision.exit_price_cents) - 1, 1)
+        exit_price_cents = int(decision.exit_price_cents)
         request = RealOrderRequest(
             market_ticker=str(position_view["market_ticker"]),
             side=str(position_view["side"]),
@@ -528,7 +547,7 @@ def _real_exit_executions(
             no_price_cents=exit_price_cents if str(position_view["side"]) == "no" else None,
             client_order_id=f"cryptobot-exit-{str(position_view['market_ticker']).lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
         )
-        execution = executor.submit_order(request)
+        execution = executor.submit_exit_order(request)
         executions.append(
             {
                 "market_ticker": position_view["market_ticker"],
@@ -545,13 +564,111 @@ def _real_exit_executions(
     return executions
 
 
+def _markets_with_active_exit_work(exit_executions: list[dict[str, Any]]) -> set[str]:
+    markets: set[str] = set()
+    for item in exit_executions:
+        market_ticker = str(item.get("market_ticker") or "")
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        status = str(execution.get("status") or "").lower()
+        lifecycle = str(execution.get("lifecycle_state") or "").lower()
+        if not market_ticker:
+            continue
+        if status == "blocked":
+            continue
+        if lifecycle in {"filled", "cancelled", "canceled"}:
+            continue
+        markets.add(market_ticker)
+    return markets
+
+
+def _real_rank_candidate_snapshots(trader: LivePaperTrader, snapshots, feature_frame):
+    candidates: list[tuple[float, float, float, float, Any]] = []
+    for snapshot in snapshots:
+        evaluation = trader.engine.evaluate_snapshot(snapshot, feature_frame)
+        if evaluation == (None, None):
+            continue
+        signal, estimate = evaluation
+        if signal is None or estimate is None or signal.action == "no_action" or signal.side is None or signal.entry_price_cents is None:
+            continue
+        ranking_score = signal.quality_score
+        repricing_score = signal.predicted_repricing_cents or -999.0
+        edge = signal.edge or -999.0
+        spread = -(signal.spread_cents or 99)
+        snapshot.metadata["_paper_signal"] = signal
+        snapshot.metadata["_paper_estimate"] = estimate
+        candidates.append((ranking_score, repricing_score, edge, spread, snapshot))
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+    return candidates
+
+
+def _resolve_start_of_day_balance(
+    *,
+    sod_data: dict[str, Any] | None,
+    current_equity: float,
+    today: str,
+) -> tuple[float, bool]:
+    if sod_data is None or str(sod_data.get("date")) != today:
+        return current_equity, True
+    try:
+        sod_balance = float(sod_data.get("balance", current_equity))
+    except (TypeError, ValueError):
+        return current_equity, True
+    external_deposit_threshold = max(5.0, sod_balance * 0.5)
+    if current_equity >= sod_balance + external_deposit_threshold:
+        return current_equity, True
+    return sod_balance, False
+
+
+def _load_recent_series_snapshots_from_store(settings, trader: LivePaperTrader, *, series_ticker: str):
+    now = datetime.now(timezone.utc)
+    store = SnapshotStore(snapshot_store_dsn(settings), read_only=True)
+    max_minutes = trader.collector.config.max_minutes_to_expiry
+    lookback_minutes = max(int(max_minutes) if max_minutes is not None else 60, 15) + 5
+    recent_rows = store.load_recent_rows(
+        series_ticker=series_ticker,
+        observed_from=now - timedelta(minutes=lookback_minutes),
+        observed_to=now,
+        descending=True,
+        limit=max(int(trader.collector.config.market_limit) * 20, 1000),
+    )
+
+    min_delta = timedelta(minutes=trader.collector.config.min_minutes_to_expiry)
+    max_delta = timedelta(minutes=max_minutes) if max_minutes is not None else None
+    latest_by_market: dict[str, Any] = {}
+    for snapshot in recent_rows:
+        if snapshot.market_ticker in latest_by_market:
+            continue
+        time_to_expiry = snapshot.expiry - now
+        if time_to_expiry < min_delta:
+            continue
+        if max_delta is not None and time_to_expiry > max_delta:
+            continue
+        latest_by_market[snapshot.market_ticker] = snapshot
+        if len(latest_by_market) >= max(int(trader.collector.config.market_limit) * 3, int(trader.collector.config.market_limit)):
+            break
+    return list(latest_by_market.values())
+
+
+def _collect_live_series_snapshots(settings, trader: LivePaperTrader, *, series_ticker: str):
+    _log = logging.getLogger(__name__)
+    try:
+        snapshots = asyncio.run(trader.collector.reconcile_once())
+    except Exception as exc:
+        _log.warning("Fresh snapshot reconcile failed for %s; skipping cycle: %s", series_ticker, exc)
+        return []
+    if not snapshots:
+        _log.warning("reconcile_once() returned empty for %s; skipping cycle.", series_ticker)
+        return []
+    return snapshots
+
+
 def execute_real_trade_once(settings, args) -> dict[str, Any]:
     series_ticker = configured_real_series(settings, explicit_series=getattr(args, "series", None))
     executor = build_real_executor(settings, live=bool(args.live), series_ticker=series_ticker)
     housekeeping = executor.cancel_stale_orders()
     trader = build_live_paper_trader(settings)
     _configure_live_trader_for_args(trader, args)
-    snapshots = asyncio.run(trader.collector.reconcile_once())
+    snapshots = _collect_live_series_snapshots(settings, trader, series_ticker=series_ticker)
     feature_frame = trader._build_feature_frame()
     exit_executions = _real_exit_executions(
         trader=trader,
@@ -559,6 +676,12 @@ def execute_real_trade_once(settings, args) -> dict[str, Any]:
         snapshots=snapshots,
         feature_frame=feature_frame,
     )
+    exit_busy_markets = _markets_with_active_exit_work(exit_executions)
+    try:
+        balance_cents = int(executor.kalshi_client.get_balance().get("balance", 0))
+        executor.set_current_equity(balance_cents / 100.0)
+    except Exception:
+        executor.set_current_equity(None)
     if bool(settings.real.get("skip_cycle_after_cancel", True)) and int(housekeeping.get("cancelled_count", 0)) > 0:
         return {
             "status": "skipped_after_cancel",
@@ -568,8 +691,38 @@ def execute_real_trade_once(settings, args) -> dict[str, Any]:
             "exit_executions": exit_executions,
             "observed_at": datetime.now(timezone.utc).isoformat(),
         }
-    preview = asyncio.run(trader.preview_once())
-    top_candidates = list(preview.get("top_candidates", []) or [])
+    candidate_rows: list[dict[str, Any]] = []
+    for ranking_score, repricing_score, _edge, spread, snapshot in _real_rank_candidate_snapshots(trader, snapshots, feature_frame)[:10]:
+        if snapshot.market_ticker in exit_busy_markets:
+            continue
+        signal = snapshot.metadata.get("_paper_signal")
+        estimate = snapshot.metadata.get("_paper_estimate")
+        candidate_rows.append(
+            {
+                "market_ticker": snapshot.market_ticker,
+                "series_ticker": snapshot.series_ticker,
+                "observed_at": snapshot.observed_at.isoformat(),
+                "expiry": snapshot.expiry.isoformat(),
+                "side": getattr(signal, "side", None),
+                "action": getattr(signal, "action", None),
+                "entry_price_cents": getattr(signal, "entry_price_cents", None),
+                "edge": getattr(signal, "edge", None),
+                "quality_score": ranking_score,
+                "tier_label": getattr(signal, "tier_label", None),
+                "size_multiplier": getattr(signal, "size_multiplier", None),
+                "reason": getattr(signal, "reason", None),
+                "estimate_model": getattr(estimate, "model_name", None),
+                "predicted_repricing_cents": repricing_score if repricing_score != -999.0 else None,
+                "spread_sort_score": spread,
+            }
+        )
+    preview = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "snapshots_seen": len(snapshots),
+        "candidate_count": len(candidate_rows),
+        "top_candidates": candidate_rows,
+    }
+    top_candidates = list(candidate_rows or [])
     if not top_candidates:
         return {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping, "exit_executions": exit_executions}
 
@@ -609,12 +762,27 @@ def build_real_executor(settings, *, live: bool, series_ticker: str | None = Non
             max_open_orders=int(settings.real.get("max_open_orders", 2)),
             max_open_positions=int(settings.real.get("max_open_positions", 1)),
             stale_order_timeout_seconds=int(settings.real.get("stale_order_timeout_seconds", 60)),
+            replace_order_timeout_seconds=int(settings.real.get("replace_order_timeout_seconds", settings.real.get("stale_order_timeout_seconds", 15))),
+            cancel_order_timeout_seconds=int(settings.real.get("cancel_order_timeout_seconds", max(int(settings.real.get("stale_order_timeout_seconds", 15)) * 3, 30))),
+            keep_competitive_order_timeout_seconds=int(settings.real.get("keep_competitive_order_timeout_seconds", max(int(settings.real.get("cancel_order_timeout_seconds", max(int(settings.real.get("stale_order_timeout_seconds", 15)) * 3, 30))), 60))),
+            max_replace_attempts=int(settings.real.get("max_replace_attempts", 1)),
+            max_chase_cents=int(settings.real.get("max_chase_cents", 2)),
+            max_trade_notional=float(settings.real.get("max_trade_notional", 0.0)),
+            max_total_open_notional=float(settings.real.get("max_total_open_notional", 0.0)),
+            max_notional_per_market=float(settings.real.get("max_notional_per_market", 0.0)),
+            max_notional_per_expiry=float(settings.real.get("max_notional_per_expiry", 0.0)),
+            max_same_side_notional_per_expiry=float(settings.real.get("max_same_side_notional_per_expiry", 0.0)),
+            max_trade_notional_fraction=float(settings.real.get("max_trade_notional_fraction", 0.0)),
+            max_total_open_notional_fraction=float(settings.real.get("max_total_open_notional_fraction", 0.0)),
+            max_notional_per_market_fraction=float(settings.real.get("max_notional_per_market_fraction", 0.0)),
+            max_notional_per_expiry_fraction=float(settings.real.get("max_notional_per_expiry_fraction", 0.0)),
+            max_same_side_notional_per_expiry_fraction=float(settings.real.get("max_same_side_notional_per_expiry_fraction", 0.0)),
         ),
     )
 
 
 def attach_replay_calibrators(settings, engine: BacktestEngine) -> dict[str, int]:
-    store = SnapshotStore(str(settings.collector["sqlite_path"]))
+    store = SnapshotStore(snapshot_store_dsn(settings))
     snapshots = store.load_snapshots(
         series_ticker=str(settings.collector["series_ticker"]),
         replay_ready_only=True,
@@ -657,7 +825,7 @@ def attach_replay_calibrators(settings, engine: BacktestEngine) -> dict[str, int
 
 
 def attach_replay_repricing_model(settings, engine: BacktestEngine) -> int:
-    store = SnapshotStore(str(settings.collector["sqlite_path"]))
+    store = SnapshotStore(snapshot_store_dsn(settings))
     snapshots = store.load_snapshots(
         series_ticker=str(settings.collector["series_ticker"]),
         replay_ready_only=True,
@@ -718,8 +886,8 @@ def build_comparison_engines(settings, engine: BacktestEngine) -> dict[str, Back
 
 
 def build_market_data_client(settings) -> CoinbaseClient:
-    primary_provider = str(settings.data.get("market_data_primary", "binance")).strip().lower()
-    fallback_providers = settings.data.get("market_data_fallbacks", ["coinbase"])
+    primary_provider = str(settings.data.get("market_data_primary", "coinbase")).strip().lower()
+    fallback_providers = settings.data.get("market_data_fallbacks", ["kraken"])
     if not isinstance(fallback_providers, list):
         fallback_providers = [fallback_providers]
     provider_order = tuple(
@@ -782,6 +950,13 @@ def build_live_paper_trader(settings, *, series_ticker: str | None = None):
     coinbase = build_market_data_client(settings)
     store = SnapshotStore(snapshot_read_path(settings), read_only=True)
     _, engine = build_engine(attach_calibration=False, attach_repricing_profile=False)
+    series_tier_profile = dict(settings.raw.get("signal_tiers", {})).get(paper_series_ticker, {})
+    if series_tier_profile.get("disable_stop_loss") or series_tier_profile.get("disable_early_exits"):
+        engine.exit_config = replace(
+            engine.exit_config,
+            disable_stop_loss=bool(series_tier_profile.get("disable_stop_loss", False)),
+            disable_early_exits=bool(series_tier_profile.get("disable_early_exits", False)),
+        )
     paper_starting_capital = float(paper_series_value(settings, paper_series_ticker, "starting_capital", settings.paper.get("starting_capital", 100.0)))
     engine.backtest_config = replace(engine.backtest_config, starting_bankroll=paper_starting_capital)
     settlement_max_markets = int(settings.paper.get("settlement_max_markets_per_cycle", 0))
@@ -832,7 +1007,7 @@ def build_live_paper_trader(settings, *, series_ticker: str | None = None):
 def build_backfill_service(settings, *, series_ticker: str, start_ts: int, end_ts: int, period_interval: int | None):
     coinbase = build_market_data_client(settings)
     kalshi = KalshiClient()
-    store = SnapshotStore(str(settings.collector["sqlite_path"]))
+    store = SnapshotStore(snapshot_store_dsn(settings))
     config = BackfillConfig(
         series_ticker=series_ticker,
         start_ts=start_ts,
@@ -1098,7 +1273,7 @@ def main() -> None:
             json.dumps(
                 {
                     "snapshots_written": len(snapshots),
-                    "sqlite_path": str(settings.collector["sqlite_path"]),
+                    "snapshot_store_dsn": snapshot_store_dsn(settings),
                     "series_ticker": collector.config.series_ticker,
                     "series_tickers": collector.config.series_tickers,
                     "min_minutes_to_expiry": collector.config.min_minutes_to_expiry,
@@ -1120,7 +1295,7 @@ def main() -> None:
         logging.getLogger(__name__).info(
             "Starting collector for series %s into %s",
             ",".join(collector.config.series_tickers or [collector.config.series_ticker]),
-            settings.collector["sqlite_path"],
+            snapshot_store_dsn(settings),
         )
         try:
             asyncio.run(collector.collect_forever())
@@ -1128,28 +1303,10 @@ def main() -> None:
             logging.getLogger(__name__).info("Collector stopped by user.")
         return
     if args.command == "replicate-snapshot-db-once":
-        source = str(args.source or snapshot_write_path(settings))
-        target = str(args.target or snapshot_read_path(settings))
-        print(json.dumps(replicate_snapshot_db_once(source_path=source, target_path=target), indent=2))
+        raise RuntimeError("Snapshot replica commands are disabled after the PostgreSQL migration.")
         return
     if args.command == "replicate-snapshot-db-forever":
-        source = str(args.source or snapshot_write_path(settings))
-        target = str(args.target or snapshot_read_path(settings))
-        interval_seconds = int(args.interval_seconds or snapshot_replica_interval_seconds(settings))
-        logging.getLogger(__name__).info(
-            "Starting snapshot DB replica loop from %s to %s every %ss",
-            source,
-            target,
-            interval_seconds,
-        )
-        try:
-            replicate_snapshot_db_forever(
-                source_path=source,
-                target_path=target,
-                interval_seconds=interval_seconds,
-            )
-        except KeyboardInterrupt:
-            logging.getLogger(__name__).info("Snapshot replica loop stopped by user.")
+        raise RuntimeError("Snapshot replica commands are disabled after the PostgreSQL migration.")
         return
     if args.command == "paper-trade-once":
         trader = build_live_paper_trader(settings, series_ticker=args.series)
@@ -1202,89 +1359,227 @@ def main() -> None:
         return
     if args.command == "real-trade-forever":
         _log = logging.getLogger(__name__)
-        series_ticker = configured_real_series(settings, explicit_series=args.series)
-        _log.info("Starting real trader mirror for series %s in %s mode", series_ticker, "live" if bool(args.live) else "dry-run")
+        series_list = [args.series] if args.series else configured_real_series_list(settings)
+        _log.info("Starting real trader for series %s in %s mode", series_list, "live" if bool(args.live) else "dry-run")
         poll_interval = int(settings.paper["poll_interval_seconds"])
-        trader = build_live_paper_trader(settings, series_ticker=series_ticker)
-        if args.max_minutes_to_expiry is not None:
-            trader.collector.config.max_minutes_to_expiry = args.max_minutes_to_expiry
-        if args.min_minutes_to_expiry is not None:
-            trader.collector.config.min_minutes_to_expiry = args.min_minutes_to_expiry
-        executor = build_real_executor(settings, live=bool(args.live), series_ticker=series_ticker)
+        cycle_spend_fraction = float(settings.real.get("cycle_spend_fraction", 0.5))
+        max_daily_loss_fraction = float(settings.real.get("max_daily_loss_fraction", 0.05))
+        sod_balance_path = Path("data/real_start_of_day_balance.json")
+        sod_balance_path.parent.mkdir(parents=True, exist_ok=True)
+
+        traders = {s: build_live_paper_trader(settings, series_ticker=s) for s in series_list}
+        executors = {s: build_real_executor(settings, live=bool(args.live), series_ticker=s) for s in series_list}
+        for trader in traders.values():
+            if args.max_minutes_to_expiry is not None:
+                trader.collector.config.max_minutes_to_expiry = args.max_minutes_to_expiry
+            if args.min_minutes_to_expiry is not None:
+                trader.collector.config.min_minutes_to_expiry = args.min_minutes_to_expiry
+
+        first_executor = next(iter(executors.values()))
+
         while True:
             _current_market_ticker: str | None = None
             try:
-                housekeeping = executor.cancel_stale_orders()
-                snapshots = asyncio.run(trader.collector.reconcile_once())
-                feature_frame = trader._build_feature_frame()
-                exit_executions = _real_exit_executions(
-                    trader=trader,
-                    executor=executor,
-                    snapshots=snapshots,
-                    feature_frame=feature_frame,
-                )
-                if bool(settings.real.get("skip_cycle_after_cancel", True)) and int(housekeeping.get("cancelled_count", 0)) > 0:
-                    result = {
-                        "status": "skipped_after_cancel",
-                        "series_ticker": series_ticker,
-                        "reason": "Cancelled stale real order(s); skipping new entry this cycle.",
-                        "housekeeping": housekeeping,
-                        "exit_executions": exit_executions,
+                # Housekeeping on all series
+                housekeeping_by_series: dict[str, Any] = {}
+                for s, executor in executors.items():
+                    try:
+                        housekeeping_by_series[s] = executor.cancel_stale_orders()
+                    except Exception as exc:
+                        _log.warning("Housekeeping error for %s: %s", s, exc)
+                        housekeeping_by_series[s] = {"error": str(exc)}
+
+                # Collect snapshots per series
+                snapshots_by_series: dict[str, list] = {}
+                for s, trader in traders.items():
+                    try:
+                        snapshots_by_series[s] = _collect_live_series_snapshots(settings, trader, series_ticker=s)
+                    except Exception as exc:
+                        _log.warning("Snapshot reconcile error for %s: %s", s, exc)
+                        snapshots_by_series[s] = []
+
+                # Shared feature frame (same underlying BTC data for all series)
+                try:
+                    feature_frame = next(iter(traders.values()))._build_feature_frame()
+                except Exception as exc:
+                    _log.warning("Feature frame unavailable; skipping cycle: %s", exc)
+                    print(json.dumps({"status": "feature_frame_unavailable", "reason": str(exc), "observed_at": datetime.now(timezone.utc).isoformat()}, indent=2, default=str))
+                    asyncio.run(asyncio.sleep(poll_interval))
+                    continue
+
+                # Exits per series
+                exit_executions_by_series: dict[str, list] = {}
+                exit_busy_markets_by_series: dict[str, set[str]] = {}
+                for s, trader in traders.items():
+                    try:
+                        exit_executions_by_series[s] = _real_exit_executions(
+                            trader=trader,
+                            executor=executors[s],
+                            snapshots=snapshots_by_series[s],
+                            feature_frame=feature_frame,
+                        )
+                        exit_busy_markets_by_series[s] = _markets_with_active_exit_work(exit_executions_by_series[s])
+                    except Exception as exc:
+                        _log.warning("Exit execution error for %s: %s", s, exc)
+                        exit_executions_by_series[s] = []
+                        exit_busy_markets_by_series[s] = set()
+
+                # Fetch balance once for the whole cycle
+                try:
+                    balance_cents = int(first_executor.kalshi_client.get_balance().get("balance", 0))
+                    current_equity = balance_cents / 100.0
+                    for executor in executors.values():
+                        executor.set_current_equity(current_equity)
+                except Exception as balance_exc:
+                    for executor in executors.values():
+                        executor.set_current_equity(None)
+                    _log.warning("Failed to fetch Kalshi balance; skipping entry this cycle: %s", balance_exc)
+                    print(json.dumps({
+                        "status": "balance_fetch_failed",
+                        "series": series_list,
+                        "reason": f"Could not fetch account balance: {balance_exc}",
+                        "housekeeping": housekeeping_by_series,
+                        "exit_executions": exit_executions_by_series,
                         "observed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                else:
-                    # Filter candidates against real open positions
-                    real_open_tickers = {v["market_ticker"] for v in executor.open_position_views()}
-                    preview = asyncio.run(trader.preview_once())
-                    top_candidates = [c for c in (preview.get("top_candidates", []) or []) if c.get("market_ticker") not in real_open_tickers]
-                    if not top_candidates:
-                        result = {**preview, "series_ticker": series_ticker, "status": "no_candidate", "housekeeping": housekeeping, "exit_executions": exit_executions}
-                    else:
-                        executions = []
-                        try:
-                            balance_cents = int(executor.kalshi_client.get_balance().get("balance", 0))
-                            current_equity = balance_cents / 100.0
-                        except Exception:
-                            current_equity = float(trader.config.bankroll_fraction_per_trade)
-                        for top in top_candidates:
-                            _current_market_ticker = str(top["market_ticker"])
-                            side = str(top["side"])
-                            market_ticker = str(top["market_ticker"])
-                            entry_price_cents = int(top["entry_price_cents"]) if top.get("entry_price_cents") is not None else 50
-                            # Mirror paper sizing exactly
-                            size_multiplier = max(float(top.get("size_multiplier") or 1.0), 0.0)
-                            base_contracts = max(int(trader.engine.backtest_config.default_contracts), 1)
-                            max_contracts = base_contracts
-                            if trader.config.enable_bankroll_sizing:
-                                max_contracts = max(int(trader.config.max_contracts_per_trade), base_contracts)
-                                if trader.config.respect_tier_size_multiplier:
-                                    max_contracts = max(base_contracts, int(math.floor(max_contracts * size_multiplier)))
-                            available_equity = max(current_equity - float(trader.config.min_cash_buffer), 0.0)
-                            sizing_budget = available_equity * float(trader.config.bankroll_fraction_per_trade) if trader.config.enable_bankroll_sizing else available_equity
-                            count = base_contracts
-                            for c in range(max_contracts, 0, -1):
-                                notional = (entry_price_cents * c) / 100.0
-                                if not trader.config.enable_bankroll_sizing or notional <= sizing_budget:
-                                    count = c
-                                    break
-                            # Bid 1¢ above ask to ensure front-of-queue fill
-                            bid_price_cents = min(entry_price_cents + 1, 99)
-                            request = RealOrderRequest(
-                                market_ticker=market_ticker,
-                                side=side,
-                                action="buy",
-                                count=count,
-                                yes_price_cents=bid_price_cents if side == "yes" else None,
-                                no_price_cents=bid_price_cents if side == "no" else None,
-                                client_order_id=f"cryptobot-{market_ticker.lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
-                            )
-                            execution = executor.submit_order(request)
-                            executions.append({"order": request.to_api_payload(), "execution": execution})
-                            exec_status = str(execution.get("exchange_status", execution.get("status", "")))
-                            if exec_status in ("blocked",):
-                                break
-                        result = {**preview, "series_ticker": series_ticker, "executions": executions, "housekeeping": housekeeping, "exit_executions": exit_executions}
-                print(json.dumps(result, indent=2, default=str))
+                    }, indent=2, default=str))
+                    asyncio.run(asyncio.sleep(poll_interval))
+                    continue
+
+                # Track start-of-day balance and enforce dynamic daily loss limit
+                today = datetime.now(timezone.utc).date().isoformat()
+                sod_data = read_json_strict(sod_balance_path, missing_default=None, label="Start of day balance")
+                sod_balance, sod_updated = _resolve_start_of_day_balance(
+                    sod_data=sod_data if isinstance(sod_data, dict) else None,
+                    current_equity=current_equity,
+                    today=today,
+                )
+                if sod_updated:
+                    write_json_atomic(sod_balance_path, {"date": today, "balance": sod_balance})
+                daily_loss = sod_balance - current_equity
+                daily_loss_limit = sod_balance * max_daily_loss_fraction
+                if daily_loss >= daily_loss_limit:
+                    _log.warning("Daily loss limit reached: lost $%.2f of $%.2f limit. Pausing entries.", daily_loss, daily_loss_limit)
+                    print(json.dumps({
+                        "status": "daily_loss_limit_reached",
+                        "series": series_list,
+                        "daily_loss": round(daily_loss, 2),
+                        "daily_loss_limit": round(daily_loss_limit, 2),
+                        "start_of_day_balance": round(sod_balance, 2),
+                        "current_equity": round(current_equity, 2),
+                        "housekeeping": housekeeping_by_series,
+                        "exit_executions": exit_executions_by_series,
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                    }, indent=2, default=str))
+                    asyncio.run(asyncio.sleep(poll_interval))
+                    continue
+
+                cycle_budget = max(current_equity * cycle_spend_fraction, 0.0)
+
+                # Build unified candidate pool across all series, ranked by quality
+                all_candidates: list[dict[str, Any]] = []
+                for s, trader in traders.items():
+                    for _score, _repricing, _edge, _spread, snapshot in _real_rank_candidate_snapshots(trader, snapshots_by_series[s], feature_frame):
+                        if snapshot.market_ticker in exit_busy_markets_by_series.get(s, set()):
+                            continue
+                        signal = snapshot.metadata.get("_paper_signal")
+                        estimate = snapshot.metadata.get("_paper_estimate")
+                        if signal is None or estimate is None:
+                            continue
+                        all_candidates.append({
+                            "_series": s,
+                            "market_ticker": snapshot.market_ticker,
+                            "side": signal.side,
+                            "entry_price_cents": signal.entry_price_cents,
+                            "quality_score": signal.quality_score,
+                            "size_multiplier": signal.size_multiplier,
+                            "tier_label": signal.tier_label,
+                            "edge": signal.edge,
+                            "predicted_repricing_cents": signal.predicted_repricing_cents,
+                            "model_probability": signal.model_probability,
+                            "reason": signal.reason,
+                            "estimate_model": estimate.model_name,
+                        })
+
+                all_candidates.sort(key=lambda c: float(c.get("quality_score") or 0), reverse=True)
+
+                if not all_candidates:
+                    print(json.dumps({
+                        "status": "no_candidate",
+                        "series": series_list,
+                        "cycle_budget": round(cycle_budget, 2),
+                        "current_equity": round(current_equity, 2),
+                        "housekeeping": housekeeping_by_series,
+                        "exit_executions": exit_executions_by_series,
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                    }, indent=2, default=str))
+                    asyncio.run(asyncio.sleep(poll_interval))
+                    continue
+
+                # Place orders sequentially against shared running budget
+                committed = 0.0
+                executions: list[dict[str, Any]] = []
+                for candidate in all_candidates:
+                    remaining_budget = cycle_budget - committed
+                    if remaining_budget <= 0:
+                        break
+                    s = candidate["_series"]
+                    trader = traders[s]
+                    executor = executors[s]
+                    _current_market_ticker = str(candidate["market_ticker"])
+                    entry_price_cents = int(candidate["entry_price_cents"]) if candidate.get("entry_price_cents") is not None else 50
+                    side = str(candidate["side"])
+                    size_multiplier = max(float(candidate.get("size_multiplier") or 1.0), 0.0)
+                    base_contracts = max(int(trader.engine.backtest_config.default_contracts), 1)
+                    max_contracts = base_contracts
+                    if trader.config.enable_bankroll_sizing:
+                        max_contracts = max(int(trader.config.max_contracts_per_trade), base_contracts)
+                        if trader.config.respect_tier_size_multiplier:
+                            max_contracts = max(base_contracts, int(math.floor(max_contracts * size_multiplier)))
+                    bid_price_cents = min(entry_price_cents + 1, 99)
+                    order_budget = remaining_budget
+                    count = 0
+                    for c in range(max_contracts, 0, -1):
+                        notional = (bid_price_cents * c) / 100.0
+                        if notional <= order_budget:
+                            count = c
+                            break
+                    if count == 0:
+                        continue
+                    request = RealOrderRequest(
+                        market_ticker=_current_market_ticker,
+                        side=side,
+                        action="buy",
+                        count=count,
+                        yes_price_cents=bid_price_cents if side == "yes" else None,
+                        no_price_cents=bid_price_cents if side == "no" else None,
+                        client_order_id=f"cryptobot-{_current_market_ticker.lower().replace('.', '-')}-{int(datetime.now(timezone.utc).timestamp())}",
+                        entry_edge=float(candidate.get("edge") or 0.0),
+                    )
+                    execution = executor.submit_order(request)
+                    notional_committed = (bid_price_cents * count) / 100.0
+                    if str(execution.get("status", "")).lower() != "blocked":
+                        committed += notional_committed
+                    executions.append({
+                        "series_ticker": s,
+                        "order": request.to_api_payload(),
+                        "execution": execution,
+                        "notional": round(notional_committed, 2),
+                    })
+                    if str(execution.get("exchange_status", execution.get("status", ""))).lower() == "blocked":
+                        continue
+
+                print(json.dumps({
+                    "status": "ok",
+                    "series": series_list,
+                    "candidates_seen": len(all_candidates),
+                    "executions": executions,
+                    "committed_this_cycle": round(committed, 2),
+                    "cycle_budget": round(cycle_budget, 2),
+                    "current_equity": round(current_equity, 2),
+                    "housekeeping": housekeeping_by_series,
+                    "exit_executions": exit_executions_by_series,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                }, indent=2, default=str))
             except KeyboardInterrupt:
                 _log.info("Real trader stopped by user.")
                 return
@@ -1344,7 +1639,7 @@ def main() -> None:
             json.dumps(
                 {
                     "snapshots_written": len(snapshots),
-                    "sqlite_path": str(settings.collector["sqlite_path"]),
+                    "sqlite_path": snapshot_store_dsn(settings),
                     "series_ticker": series_ticker,
                     "start_ts": args.start_ts,
                     "end_ts": args.end_ts,
@@ -1391,17 +1686,17 @@ def main() -> None:
         print(json.dumps(result, indent=2, default=str))
         return
     if args.command == "dataset-summary":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         print(json.dumps(store.dataset_summary(series_ticker=series_ticker, reference_time=datetime.now(timezone.utc)), indent=2))
         return
     if args.command == "fix-series-ticker":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         updated = store.remap_series_ticker(args.old, args.new)
         print(json.dumps({"rows_updated": updated, "old": args.old, "new": args.new}, indent=2))
         return
     if args.command == "enrich-settlements":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         enricher = SettlementEnricher(
             kalshi_client=KalshiClient(),
             snapshot_store=store,
@@ -1430,7 +1725,7 @@ def main() -> None:
         )
         return
     if args.command == "replay-diagnostics":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1464,7 +1759,7 @@ def main() -> None:
         )
         return
     if args.command == "replay-backtest":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1495,7 +1790,7 @@ def main() -> None:
         print(json.dumps(output, indent=2, default=str))
         return
     if args.command == "replay-compare-models":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1541,7 +1836,7 @@ def main() -> None:
         print(json.dumps(report, indent=2, default=str))
         return
     if args.command == "replay-failure-analysis":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1601,7 +1896,7 @@ def main() -> None:
         print(json.dumps(output, indent=2, default=str))
         return
     if args.command == "replay-maker-proxy":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1687,7 +1982,7 @@ def main() -> None:
         print(json.dumps(output, indent=2, default=str))
         return
     if args.command == "replay-maker-sim":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,
@@ -1782,7 +2077,7 @@ def main() -> None:
         print(json.dumps(output, indent=2, default=str))
         return
     if args.command == "replay-grid-search":
-        store = SnapshotStore(str(settings.collector["sqlite_path"]))
+        store = SnapshotStore(snapshot_store_dsn(settings))
         series_ticker = args.series or str(settings.collector["series_ticker"])
         snapshots = store.load_snapshots(
             series_ticker=series_ticker,

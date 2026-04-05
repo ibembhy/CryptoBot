@@ -1,0 +1,15 @@
+Analysis B - Entry/exit parameter sweep
+
+[KXBTCD]
+rows=2,035,686
+entry_specs=432
+exit_specs=6
+combinations=2,592
+best={'series': 'KXBTCD', 'tte_window': '30-45', 'dist_bps_max': 200.0, 'min_edge': 0.05, 'price_window': '40-60', 'max_spread_cents': 4, 'min_volume': 0, 'side_mode': 'no_only', 'exit_mode': 'take_profit', 'stop_loss_cents': nan, 'take_profit_cents': 8.0, 'time_exit_minutes_before_expiry': nan, 'trade_count': 31, 'win_rate': 96.77, 'avg_win_cents': 13.0, 'avg_loss_cents': -44.0, 'total_pnl_cents': 346.0, 'sharpe_like': 0.960933, 'max_consecutive_losses': 1, 'avg_hold_minutes': 6.07, 'yes_trade_count': 0, 'no_trade_count': 31}
+
+[KXBTC15M]
+rows=106,900
+entry_specs=540
+exit_specs=6
+combinations=3,240
+best={'series': 'KXBTC15M', 'tte_window': '1-2', 'dist_bps_max': 100.0, 'min_edge': 0.02, 'price_window': '40-60', 'max_spread_cents': 4, 'min_volume': 0, 'side_mode': 'no_only', 'exit_mode': 'stop', 'stop_loss_cents': 10.0, 'take_profit_cents': nan, 'time_exit_minutes_before_expiry': nan, 'trade_count': 12, 'win_rate': 75.0, 'avg_win_cents': 52.1111, 'avg_loss_cents': -30.3333, 'total_pnl_cents': 378.0, 'sharpe_like': 0.856766, 'max_consecutive_losses': 2, 'avg_hold_minutes': 1.6205, 'yes_trade_count': 0, 'no_trade_count': 12}

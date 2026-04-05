@@ -24,7 +24,12 @@ class PositionBook:
         entry_time: datetime,
         entry_price_cents: int,
         strategy_mode: str,
+        signal_time: datetime | None = None,
+        intended_entry_price_cents: int | None = None,
+        entry_slippage_cents: int | None = None,
+        expiry: datetime | None = None,
         entry_fees_paid: float = 0.0,
+        entry_edge: float = 0.0,
     ) -> Position:
         self._counter += 1
         position = Position(
@@ -35,7 +40,12 @@ class PositionBook:
             entry_time=entry_time,
             entry_price_cents=entry_price_cents,
             strategy_mode=strategy_mode,
+            signal_time=signal_time,
+            intended_entry_price_cents=intended_entry_price_cents,
+            entry_slippage_cents=entry_slippage_cents,
+            expiry=expiry,
             entry_fees_paid=entry_fees_paid,
+            entry_edge=entry_edge,
         )
         self.positions[market_ticker] = position
         return position

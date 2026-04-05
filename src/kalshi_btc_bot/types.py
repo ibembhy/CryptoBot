@@ -80,8 +80,12 @@ class TradingSignal:
     reason: str
     confidence: float = 0.0
     quality_score: float = 0.0
+    tier_label: str | None = None
+    size_multiplier: float = 1.0
     spread_cents: int | None = None
     liquidity_penalty: float = 0.0
+    predicted_repricing_cents: float | None = None
+    profit_probability: float | None = None
 
 
 @dataclass
@@ -93,7 +97,16 @@ class Position:
     entry_time: datetime
     entry_price_cents: int
     strategy_mode: str
+    signal_time: datetime | None = None
+    intended_entry_price_cents: int | None = None
+    entry_slippage_cents: int | None = None
+    expiry: datetime | None = None
     entry_fees_paid: float = 0.0
+    entry_edge: float = 0.0
+    first_post_entry_time: datetime | None = None
+    first_post_entry_mark_cents: int | None = None
+    second_post_entry_time: datetime | None = None
+    second_post_entry_mark_cents: int | None = None
     status: PositionStatus = "open"
     exit_time: datetime | None = None
     exit_price_cents: int | None = None

@@ -28,7 +28,16 @@ class FusionTests(unittest.TestCase):
         )
 
     def test_hybrid_requires_side_agreement(self):
-        config = FusionConfig("hybrid", "latency_repricing", "gbm_threshold", 0.6, 0.4, True, 0.04, False)
+        config = FusionConfig(
+            mode="hybrid",
+            primary_model="latency_repricing",
+            confirm_model="gbm_threshold",
+            primary_weight=0.6,
+            confirm_weight=0.4,
+            require_side_agreement=True,
+            min_combined_edge=0.04,
+            allow_primary_unconfirmed=False,
+        )
         result = fuse_signals(
             {
                 "latency_repricing": self._signal(action="buy_yes", side="yes", edge=0.12),
@@ -40,7 +49,16 @@ class FusionTests(unittest.TestCase):
         self.assertIn("disagree", result.reason.lower())
 
     def test_hybrid_combines_confirmed_signals(self):
-        config = FusionConfig("hybrid", "latency_repricing", "gbm_threshold", 0.6, 0.4, True, 0.04, False)
+        config = FusionConfig(
+            mode="hybrid",
+            primary_model="latency_repricing",
+            confirm_model="gbm_threshold",
+            primary_weight=0.6,
+            confirm_weight=0.4,
+            require_side_agreement=True,
+            min_combined_edge=0.04,
+            allow_primary_unconfirmed=False,
+        )
         result = fuse_signals(
             {
                 "latency_repricing": self._signal(action="buy_yes", side="yes", edge=0.12),

@@ -29,6 +29,7 @@ def _settlement_price(mapping: Mapping[str, object]) -> float | None:
         mapping,
         "settlement_price",
         "final_price",
+        "settlement_value",
         "settlement_value_dollars",
         "yes_settlement_value_dollars",
     )
@@ -63,6 +64,10 @@ def _infer_direction(
     ]
     text = " ".join(str(value).lower() for value in text_fields if value)
     if contract_type == "threshold":
+        if "price up" in text or " up " in f" {text} ":
+            return "above"
+        if "price down" in text or " down " in f" {text} ":
+            return "below"
         if "or above" in text or "above" in text or "higher" in text:
             return "above"
         if "or below" in text or "below" in text or "lower" in text:

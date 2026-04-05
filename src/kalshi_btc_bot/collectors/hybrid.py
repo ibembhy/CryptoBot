@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import websockets
 
@@ -21,14 +22,17 @@ log = logging.getLogger(__name__)
 @dataclass
 class HybridCollectorConfig:
     series_ticker: str
+    series_tickers: list[str] | None = None
     status: str = "open"
     market_limit: int = 200
     min_minutes_to_expiry: int = 0
     max_minutes_to_expiry: int | None = 180
     reconcile_interval_seconds: int = 60
-    spot_refresh_interval_seconds: int = 10
+    spot_refresh_interval_seconds: int = 3
+    event_discovery_cache_seconds: int = 10
     websocket_channels: list[str] = field(default_factory=lambda: ["ticker"])
     websocket_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    persist_snapshots: bool = True
 
 
 class HybridCollector:
@@ -48,6 +52,8 @@ class HybridCollector:
         self.websocket_headers_factory = websocket_headers_factory
         self.market_registry: dict[str, dict[str, Any]] = {}
         self._spot_cache: tuple[float, datetime] | None = None
+        self._event_ticker_cache: dict[str, tuple[list[str], datetime]] = {}
+        self._websocket: Any | None = None
 
     async def collect_forever(self) -> None:
         await self.bootstrap()
@@ -62,13 +68,17 @@ class HybridCollector:
                 raw,
                 spot_price=spot,
                 observed_at=observed_at,
-                series_ticker_override=self.config.series_ticker,
             )
             for raw in raw_markets
         ]
-        for raw, snapshot in zip(raw_markets, snapshots, strict=False):
-            self.market_registry[snapshot.market_ticker] = dict(raw)
-            self.snapshot_store.insert_snapshot(snapshot)
+        new_market_registry = {snapshot.market_ticker: dict(raw) for raw, snapshot in zip(raw_markets, snapshots, strict=False)}
+        registry_changed = set(new_market_registry) != set(self.market_registry)
+        self.market_registry = new_market_registry
+        if self.config.persist_snapshots:
+            for raw, snapshot in zip(raw_markets, snapshots, strict=False):
+                self.snapshot_store.insert_snapshot(snapshot)
+        if registry_changed:
+            await self._refresh_live_subscription()
         return snapshots
 
     async def reconcile_once(self) -> list[MarketSnapshot]:
@@ -99,31 +109,179 @@ class HybridCollector:
             raw_market,
             spot_price=spot,
             observed_at=observed_at,
-            series_ticker_override=self.config.series_ticker,
         )
-        self.snapshot_store.insert_snapshot(snapshot)
+        if self.config.persist_snapshots:
+            self.snapshot_store.insert_snapshot(snapshot)
         return snapshot
 
     def _discover_markets(self, *, observed_at: datetime, spot_price: float) -> list[dict[str, Any]]:
+        targeted_markets = self._discover_event_markets(observed_at=observed_at)
+        if targeted_markets:
+            return self._filter_and_rank_markets(targeted_markets, observed_at, spot_price)
+
         raw_markets: list[dict[str, Any]] = []
-        cursor: str | None = None
         max_pages = 10
         target_pool_size = max(self.config.market_limit * 3, self.config.market_limit)
-        for _ in range(max_pages):
-            page = self.kalshi_client.list_markets_page(
-                series_ticker=self.config.series_ticker,
-                status=self.config.status,
-                limit=self.config.market_limit,
-                cursor=cursor,
-            )
-            page_markets = list(page.get("markets", []))
-            if not page_markets:
-                break
-            raw_markets.extend(page_markets)
-            cursor = page.get("cursor")
-            if len(raw_markets) >= target_pool_size or not cursor:
+        for series_ticker in self._series_tickers():
+            cursor: str | None = None
+            for _ in range(max_pages):
+                page = self.kalshi_client.list_markets_page(
+                    series_ticker=series_ticker,
+                    status=self.config.status,
+                    limit=self.config.market_limit,
+                    cursor=cursor,
+                )
+                page_markets = [
+                    {
+                        **dict(raw_market),
+                        "series_ticker": raw_market.get("series_ticker") or series_ticker,
+                    }
+                    for raw_market in page.get("markets", [])
+                ]
+                if not page_markets:
+                    break
+                raw_markets.extend(page_markets)
+                cursor = page.get("cursor")
+                if len(raw_markets) >= target_pool_size or not cursor:
+                    break
+            if len(raw_markets) >= target_pool_size:
                 break
         return self._filter_and_rank_markets(raw_markets, observed_at, spot_price)
+
+    def _discover_event_markets(self, *, observed_at: datetime) -> list[dict[str, Any]]:
+        raw_markets: list[dict[str, Any]] = []
+        for series_ticker in self._series_tickers():
+            event_tickers = self._discover_target_event_tickers(series_ticker=series_ticker, observed_at=observed_at)
+            for event_ticker in event_tickers:
+                cursor: str | None = None
+                for _ in range(10):
+                    page = self.kalshi_client.list_markets_page(
+                        series_ticker=series_ticker,
+                        event_ticker=event_ticker,
+                        status=self.config.status,
+                        limit=self.config.market_limit,
+                        cursor=cursor,
+                    )
+                    page_markets = [
+                        {
+                            **dict(raw_market),
+                            "series_ticker": raw_market.get("series_ticker") or series_ticker,
+                        }
+                        for raw_market in page.get("markets", [])
+                    ]
+                    if not page_markets:
+                        break
+                    raw_markets.extend(page_markets)
+                    cursor = page.get("cursor")
+                    if not cursor:
+                        break
+        deduped: list[dict[str, Any]] = []
+        seen_tickers: set[str] = set()
+        for raw_market in raw_markets:
+            ticker = str(raw_market.get("ticker") or "")
+            if ticker and ticker in seen_tickers:
+                continue
+            if ticker:
+                seen_tickers.add(ticker)
+            deduped.append(raw_market)
+        return deduped
+
+    def _discover_target_event_tickers(self, *, series_ticker: str, observed_at: datetime) -> list[str]:
+        cached = self._event_ticker_cache.get(series_ticker)
+        cache_ttl = timedelta(seconds=self.config.event_discovery_cache_seconds)
+        if cached is not None:
+            cached_tickers, cached_at = cached
+            if observed_at - cached_at <= cache_ttl:
+                return list(cached_tickers)
+
+        heuristic_tickers = self._heuristic_target_event_tickers(series_ticker=series_ticker, observed_at=observed_at)
+        if heuristic_tickers:
+            self._event_ticker_cache[series_ticker] = (list(heuristic_tickers), observed_at)
+            return heuristic_tickers
+
+        try:
+            payload = self.kalshi_client.list_events(series_ticker=series_ticker, status=self.config.status, limit=200)
+        except Exception as exc:
+            log.warning("Event discovery failed for %s: %s", series_ticker, exc)
+            if cached is not None:
+                cached_tickers, cached_at = cached
+                if observed_at - cached_at <= max(cache_ttl * 3, timedelta(seconds=30)):
+                    return list(cached_tickers)
+            return []
+
+        events = payload.get("events", [])
+        if not isinstance(events, list):
+            return []
+
+        min_delta = timedelta(minutes=self.config.min_minutes_to_expiry)
+        max_delta = timedelta(minutes=self.config.max_minutes_to_expiry) if self.config.max_minutes_to_expiry is not None else None
+        targeted: list[tuple[datetime, str]] = []
+        for raw_event in events:
+            if not isinstance(raw_event, dict):
+                continue
+            event_ticker = str(raw_event.get("event_ticker") or raw_event.get("ticker") or "")
+            event_close = self._parse_event_close(raw_event)
+            if not event_ticker or event_close is None:
+                continue
+            time_to_expiry = event_close - observed_at
+            if time_to_expiry < min_delta:
+                continue
+            if max_delta is not None and time_to_expiry > max_delta:
+                continue
+            targeted.append((event_close, event_ticker))
+
+        targeted.sort(key=lambda item: item[0])
+        event_tickers = [ticker for _, ticker in targeted]
+        self._event_ticker_cache[series_ticker] = (list(event_tickers), observed_at)
+        return event_tickers
+
+    def _heuristic_target_event_tickers(self, *, series_ticker: str, observed_at: datetime) -> list[str]:
+        normalized = str(series_ticker or "").upper()
+        if normalized == "KXBTCD":
+            interval_minutes = 60
+            stamp_format = "%y%b%d%H"
+        elif normalized == "KXBTC15M":
+            interval_minutes = 15
+            stamp_format = "%y%b%d%H%M"
+        else:
+            return []
+
+        observed_local = observed_at.astimezone(ZoneInfo("America/New_York"))
+        boundary = self._next_event_boundary(observed_local, interval_minutes=interval_minutes)
+        min_delta = timedelta(minutes=self.config.min_minutes_to_expiry)
+        max_delta = timedelta(minutes=self.config.max_minutes_to_expiry) if self.config.max_minutes_to_expiry is not None else None
+        targeted: list[str] = []
+        for _ in range(8):
+            boundary_utc = boundary.astimezone(timezone.utc)
+            time_to_expiry = boundary_utc - observed_at
+            if time_to_expiry >= min_delta and (max_delta is None or time_to_expiry <= max_delta):
+                targeted.append(f"{normalized}-{boundary.strftime(stamp_format).upper()}")
+            if max_delta is not None and time_to_expiry > max_delta:
+                break
+            boundary = boundary + timedelta(minutes=interval_minutes)
+        return targeted
+
+    @staticmethod
+    def _next_event_boundary(observed_local: datetime, *, interval_minutes: int) -> datetime:
+        if (
+            observed_local.second == 0
+            and observed_local.microsecond == 0
+            and observed_local.minute % interval_minutes == 0
+        ):
+            return observed_local
+        base = observed_local.replace(second=0, microsecond=0)
+        next_minute = ((base.minute // interval_minutes) + 1) * interval_minutes
+        if next_minute >= 60:
+            base = (base + timedelta(hours=1)).replace(minute=0)
+        else:
+            base = base.replace(minute=next_minute)
+        return base
+
+    def _series_tickers(self) -> list[str]:
+        configured = list(self.config.series_tickers or [])
+        if self.config.series_ticker and self.config.series_ticker not in configured:
+            configured.insert(0, self.config.series_ticker)
+        return [item for item in configured if item]
 
     async def _reconcile_loop(self) -> None:
         while True:
@@ -147,6 +305,7 @@ class HybridCollector:
                     additional_headers=websocket_headers,
                     proxy=None,
                 ) as websocket:
+                    self._websocket = websocket
                     await websocket.send(json.dumps(self._build_subscribe_message(market_tickers)))
                     async for raw_message in websocket:
                         payload = json.loads(raw_message)
@@ -159,6 +318,8 @@ class HybridCollector:
                 log.warning("Kalshi websocket disconnected: %s", exc)
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 30)
+            finally:
+                self._websocket = None
 
     def _build_subscribe_message(self, market_tickers: list[str]) -> dict[str, Any]:
         return {
@@ -178,6 +339,14 @@ class HybridCollector:
         spot = self.coinbase_client.get_spot_price()
         self._spot_cache = (spot, observed_at)
         return spot
+
+    async def _refresh_live_subscription(self) -> None:
+        websocket = self._websocket
+        if websocket is None:
+            return
+        if getattr(websocket, "closed", False):
+            return
+        await websocket.close()
 
     def _filter_and_rank_markets(self, raw_markets: list[dict], observed_at: datetime, spot_price: float) -> list[dict]:
         eligible: list[tuple[tuple[float, datetime], dict[str, Any]]] = []
@@ -220,3 +389,31 @@ class HybridCollector:
             except ValueError:
                 continue
         return None
+
+    @staticmethod
+    def _parse_event_close(raw_event: dict[str, Any]) -> datetime | None:
+        for key in ("close_time", "expected_expiration_time", "settlement_time", "expiration_time"):
+            value = raw_event.get(key)
+            if not value:
+                continue
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+
+        event_ticker = str(raw_event.get("event_ticker") or raw_event.get("ticker") or "")
+        if "-" not in event_ticker:
+            return None
+        stamp = event_ticker.split("-", 1)[1]
+        fmt = None
+        if len(stamp) == 9:
+            fmt = "%y%b%d%H"
+        elif len(stamp) == 11:
+            fmt = "%y%b%d%H%M"
+        if fmt is None:
+            return None
+        try:
+            local_dt = datetime.strptime(stamp, fmt).replace(tzinfo=ZoneInfo("America/New_York"))
+        except ValueError:
+            return None
+        return local_dt.astimezone(timezone.utc)

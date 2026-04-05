@@ -12,6 +12,8 @@ class FusionConfig:
     confirm_model: str
     primary_weight: float
     confirm_weight: float
+    ranking_support_model: str | None = None
+    ranking_support_weight: float = 0.0
     require_side_agreement: bool = True
     min_combined_edge: float = 0.0
     allow_primary_unconfirmed: bool = False
@@ -22,6 +24,24 @@ def fuse_signals(
     *,
     config: FusionConfig,
 ) -> TradingSignal:
+    if config.primary_model not in signals or config.confirm_model not in signals:
+        available = next(iter(signals.values())) if signals else None
+        if available is None:
+            raise ValueError("fuse_signals called with empty signals dict")
+        return TradingSignal(
+            market_ticker=available.market_ticker,
+            action="no_action",
+            side=None,
+            raw_model_probability=available.raw_model_probability,
+            model_probability=available.model_probability,
+            market_probability=available.market_probability,
+            edge=None,
+            raw_edge=None,
+            entry_price_cents=None,
+            fair_value_cents=None,
+            expected_value_cents=None,
+            reason=f"Required model missing from signals: expected {config.primary_model}, {config.confirm_model}.",
+        )
     primary = signals[config.primary_model]
     confirm = signals[config.confirm_model]
     if config.mode != "hybrid":

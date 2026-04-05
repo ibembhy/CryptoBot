@@ -3,7 +3,7 @@ import unittest
 
 import pandas as pd
 
-from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine
+from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine, MakerSimulationConfig
 from kalshi_btc_bot.models.gbm_threshold import GBMThresholdModel
 from kalshi_btc_bot.signals.engine import SignalConfig
 from kalshi_btc_bot.trading.exits import ExitConfig
@@ -65,6 +65,72 @@ class BacktestEngineTests(unittest.TestCase):
         )
         self.assertFalse(BacktestEngine._contract_wins(snapshot, "yes"))
         self.assertTrue(BacktestEngine._contract_wins(snapshot, "no"))
+
+    def test_maker_sim_can_fill_conservatively_when_quote_is_touched(self):
+        observed_at = datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc)
+        expiry = datetime(2026, 3, 30, 15, 10, tzinfo=timezone.utc)
+        base = dict(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-TEST",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            expiry=expiry,
+            threshold=65000,
+            direction="above",
+        )
+        snapshots = [
+            MarketSnapshot(observed_at=observed_at, spot_price=64000, yes_bid=0.05, yes_ask=0.06, no_bid=0.94, no_ask=0.95, volume=600, open_interest=600, **base),
+            MarketSnapshot(observed_at=observed_at + timedelta(seconds=10), spot_price=64020, yes_bid=0.05, yes_ask=0.06, no_bid=0.93, no_ask=0.94, volume=600, open_interest=600, **base),
+            MarketSnapshot(observed_at=expiry, spot_price=64050, settlement_price=0.0, yes_bid=0.0, yes_ask=0.01, no_bid=0.99, no_ask=1.0, volume=600, open_interest=600, **base),
+        ]
+        features = pd.DataFrame(
+            {"realized_volatility": [0.9, 0.9], "btc_micro_jump_flag": [0.0, 0.0]},
+            index=pd.to_datetime([observed_at, observed_at + timedelta(seconds=10)]),
+        )
+        engine = BacktestEngine(
+            model=GBMThresholdModel(),
+            signal_config=SignalConfig(0.04, 0.0, 5, 95, uncertainty_penalty=0.0, max_spread_cents=20, max_data_age_seconds=10**9),
+            exit_config=ExitConfig(8, 10, 2, 5),
+            backtest_config=BacktestConfig(1, 0, 0, 0.0, 1000.0),
+            maker_simulation_config=MakerSimulationConfig(max_wait_seconds=30, min_fill_probability=0.55, stale_quote_age_seconds=20),
+        )
+        result = engine.run_strategy_with_entry_style("hold_to_settlement", snapshots, features, entry_style="maker_sim")
+        self.assertEqual(len(result.trades), 1)
+        self.assertEqual(result.trades.iloc[0]["entry_style"], "maker_sim")
+        self.assertGreater(float(result.trades.iloc[0]["maker_fill_probability"]), 0.55)
+
+    def test_maker_sim_cancels_when_quote_goes_stale(self):
+        observed_at = datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc)
+        expiry = datetime(2026, 3, 30, 15, 10, tzinfo=timezone.utc)
+        base = dict(
+            source="test",
+            series_ticker="KXBTCD",
+            market_ticker="KXBTCD-STALE",
+            contract_type="threshold",
+            underlying_symbol="BTC-USD",
+            expiry=expiry,
+            threshold=65000,
+            direction="above",
+        )
+        snapshots = [
+            MarketSnapshot(observed_at=observed_at, spot_price=64000, yes_bid=0.05, yes_ask=0.06, no_bid=0.94, no_ask=0.95, volume=600, open_interest=600, **base),
+            MarketSnapshot(observed_at=observed_at + timedelta(minutes=2), spot_price=64020, yes_bid=0.05, yes_ask=0.06, no_bid=0.94, no_ask=0.95, volume=600, open_interest=600, **base),
+            MarketSnapshot(observed_at=expiry, spot_price=64050, settlement_price=0.0, yes_bid=0.0, yes_ask=0.01, no_bid=0.99, no_ask=1.0, volume=600, open_interest=600, **base),
+        ]
+        features = pd.DataFrame(
+            {"realized_volatility": [0.9, 0.9], "btc_micro_jump_flag": [0.0, 0.0]},
+            index=pd.to_datetime([observed_at, observed_at + timedelta(minutes=2)]),
+        )
+        engine = BacktestEngine(
+            model=GBMThresholdModel(),
+            signal_config=SignalConfig(0.04, 0.0, 5, 95, uncertainty_penalty=0.0, max_spread_cents=20, max_data_age_seconds=10**9),
+            exit_config=ExitConfig(8, 10, 2, 5),
+            backtest_config=BacktestConfig(1, 0, 0, 0.0, 1000.0),
+            maker_simulation_config=MakerSimulationConfig(max_wait_seconds=180, min_fill_probability=0.55, stale_quote_age_seconds=20),
+        )
+        result = engine.run_strategy_with_entry_style("hold_to_settlement", snapshots, features, entry_style="maker_sim")
+        self.assertTrue(result.trades.empty)
 
 
 if __name__ == "__main__":

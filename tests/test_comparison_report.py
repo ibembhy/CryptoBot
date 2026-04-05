@@ -8,7 +8,12 @@ import pandas as pd
 from kalshi_btc_bot.backtest.engine import BacktestConfig, BacktestEngine
 from kalshi_btc_bot.models.gbm_threshold import GBMThresholdModel
 from kalshi_btc_bot.models.latency_repricing import LatencyRepricingModel
-from kalshi_btc_bot.reports.comparison import build_grid_search_report, build_model_comparison_report, filter_snapshots_for_focus
+from kalshi_btc_bot.reports.comparison import (
+    build_failure_analysis,
+    build_grid_search_report,
+    build_model_comparison_report,
+    filter_snapshots_for_focus,
+)
 from kalshi_btc_bot.signals.fusion import FusionConfig
 from kalshi_btc_bot.signals.engine import SignalConfig
 from kalshi_btc_bot.trading.exits import ExitConfig
@@ -75,7 +80,13 @@ class ComparisonReportTests(unittest.TestCase):
             signal_config=SignalConfig(0.01, 0.0, 5, 95),
             exit_config=ExitConfig(8, 10, 3, 5),
             backtest_config=BacktestConfig(1, 1, 1, 0.0, 1000.0),
-            fusion_config=FusionConfig("hybrid", "latency_repricing", "gbm_threshold", 0.6, 0.4),
+            fusion_config=FusionConfig(
+                mode="hybrid",
+                primary_model="latency_repricing",
+                confirm_model="gbm_threshold",
+                primary_weight=0.6,
+                confirm_weight=0.4,
+            ),
             risk_config=RiskConfig(100.0, 1000.0, 5, 5, 100.0, 100.0),
         )
         report = build_model_comparison_report(
@@ -178,7 +189,13 @@ class ComparisonReportTests(unittest.TestCase):
             signal_config=SignalConfig(0.01, 0.0, 5, 95),
             exit_config=ExitConfig(8, 10, 3, 5),
             backtest_config=BacktestConfig(1, 1, 1, 0.0, 1000.0),
-            fusion_config=FusionConfig("hybrid", "latency_repricing", "gbm_threshold", 0.6, 0.4),
+            fusion_config=FusionConfig(
+                mode="hybrid",
+                primary_model="latency_repricing",
+                confirm_model="gbm_threshold",
+                primary_weight=0.6,
+                confirm_weight=0.4,
+            ),
             risk_config=RiskConfig(100.0, 1000.0, 5, 5, 100.0, 100.0),
         )
         report = build_grid_search_report(
@@ -199,6 +216,29 @@ class ComparisonReportTests(unittest.TestCase):
         self.assertEqual(report["grid_size"], 3)
         self.assertEqual(len(report["top_results"]), 3)
         self.assertIn("best_mode", report["top_results"][0])
+
+    def test_build_failure_analysis_surfaces_best_and_worst_buckets(self):
+        model_report = {
+            "early_exit": {"pnl": 1.5, "trade_count": 10, "roi": 5.0},
+            "bucket_breakdown": {
+                "early_exit": {
+                    "price_band": [
+                        {"price_band": "[25, 40)", "trade_count": 4, "pnl": 2.0, "roi": 20.0, "win_rate": 75.0, "avg_edge": 0.2},
+                        {"price_band": "[60, 75)", "trade_count": 3, "pnl": -1.0, "roi": -10.0, "win_rate": 33.0, "avg_edge": 0.1},
+                    ],
+                    "exit_trigger": [
+                        {"exit_trigger": "take_profit", "trade_count": 2, "pnl": 1.2, "roi": 30.0, "win_rate": 100.0, "avg_edge": 0.3},
+                        {"exit_trigger": "stop_loss", "trade_count": 3, "pnl": -1.5, "roi": -25.0, "win_rate": 0.0, "avg_edge": 0.08},
+                    ],
+                }
+            },
+        }
+        analysis = build_failure_analysis(model_report, strategy_mode="early_exit", top_n=1)
+        self.assertEqual(analysis["summary"]["pnl"], 1.5)
+        self.assertEqual(analysis["best_buckets"]["price_band"][0]["price_band"], "[25, 40)")
+        self.assertEqual(analysis["worst_buckets"]["exit_trigger"][0]["exit_trigger"], "stop_loss")
+        self.assertEqual(analysis["primary_leaks"][0]["bucket"], "exit_trigger")
+        self.assertEqual(analysis["strongest_pockets"][0]["bucket"], "price_band")
 
 
 if __name__ == "__main__":

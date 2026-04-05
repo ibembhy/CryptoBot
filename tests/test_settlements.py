@@ -5,7 +5,7 @@ from kalshi_btc_bot.collectors.settlements import SettlementEnricher, Settlement
 from kalshi_btc_bot.markets.kalshi import KalshiClient
 from kalshi_btc_bot.storage.snapshots import SnapshotStore
 from kalshi_btc_bot.types import MarketSnapshot
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 class FakeSettlementKalshiClient(KalshiClient):
@@ -24,14 +24,15 @@ class SettlementTests(unittest.TestCase):
         if db_path.exists():
             db_path.unlink()
         store = SnapshotStore(db_path)
+        observed_at = datetime.now(timezone.utc) - timedelta(hours=2)
         snapshot = MarketSnapshot(
             source="test",
             series_ticker="KXBTCD",
             market_ticker="KXBTCD-65000",
             contract_type="threshold",
             underlying_symbol="BTC-USD",
-            observed_at=datetime(2026, 3, 30, 15, 0, tzinfo=timezone.utc),
-            expiry=datetime(2026, 3, 30, 16, 0, tzinfo=timezone.utc),
+            observed_at=observed_at,
+            expiry=observed_at + timedelta(hours=1),
             spot_price=64000,
             threshold=65000,
             direction="above",
