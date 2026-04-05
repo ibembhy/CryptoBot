@@ -18,3 +18,13 @@ data/*.json
 
 test_artifacts/
 repo_git/
+
+# Large analysis data files
+data/analysis_results/*.pkl
+data/analysis_results/*_clean_snapshots.csv
+data/analysis_results/*_dedup_audit.csv
+data/analysis_results/*_dq_stale_quotes.csv
+data/analysis_results/*_global_spot_features.csv
+data/analysis_results/*_dq_*.csv
+data/*.sqlite3
+data/replay_cache/
