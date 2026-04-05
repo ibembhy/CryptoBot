@@ -54,6 +54,7 @@ class HybridCollector:
         self._spot_cache: tuple[float, datetime] | None = None
         self._event_ticker_cache: dict[str, tuple[list[str], datetime]] = {}
         self._websocket: Any | None = None
+        self._last_prune: datetime | None = None
 
     async def collect_forever(self) -> None:
         await self.bootstrap()
@@ -289,6 +290,15 @@ class HybridCollector:
                 await self.reconcile_once()
             except Exception as exc:
                 log.warning("REST reconcile failed: %s", exc)
+            now = datetime.now(timezone.utc)
+            if self._last_prune is None or (now - self._last_prune).total_seconds() > 3600:
+                try:
+                    pruned = self.snapshot_store.prune_old_snapshots(retain_days=30)
+                    if pruned:
+                        log.info("Pruned %d old snapshots (retain_days=30).", pruned)
+                    self._last_prune = now
+                except Exception as exc:
+                    log.warning("Snapshot pruning failed: %s", exc)
             await asyncio.sleep(self.config.reconcile_interval_seconds)
 
     async def _websocket_loop(self) -> None:

@@ -41,34 +41,34 @@ profit_cost_cents = 2.0
 [signal]
 min_edge = 0.05
 min_confidence = 0.0
-min_contract_price_cents = 25
-max_contract_price_cents = 70
-max_near_money_bps = 5000.0
+min_contract_price_cents = 40
+max_contract_price_cents = 60
+max_near_money_bps = 200.0
 min_liquidity = 0.0
-uncertainty_penalty = 0.03
-max_spread_cents = 8
-liquidity_penalty_per_100_volume = 0.002
+uncertainty_penalty = 0.0
+max_spread_cents = 4
+liquidity_penalty_per_100_volume = 0.0
 max_data_age_seconds = 120
 
 [signal_tiers.KXBTCD]
-allowed_sides = ["yes", "no"]
+allowed_sides = ["no"]
 preferred_price_min_cents = 40
 preferred_price_max_cents = 60
-secondary_price_min_cents = 30
-secondary_price_max_cents = 40
-soft_price_max_cents = 70
-preferred_minutes_min = 10
-preferred_minutes_max = 55
-soft_minutes_min = 5
-disable_tier_d = false
+secondary_price_min_cents = 40
+secondary_price_max_cents = 60
+soft_price_max_cents = 60
+preferred_minutes_min = 30
+preferred_minutes_max = 45
+soft_minutes_min = 30
+disable_tier_d = true
 tier_a_size_multiplier = 1.0
-tier_a_quality_bonus = 0.75
+tier_a_quality_bonus = 0.0
 tier_b_size_multiplier = 0.7
-tier_b_quality_bonus = 0.35
+tier_b_quality_bonus = 0.0
 tier_c_size_multiplier = 0.4
-tier_c_quality_bonus = -0.1
-tier_d_size_multiplier = 0.15
-tier_d_quality_bonus = -0.3
+tier_c_quality_bonus = 0.0
+tier_d_size_multiplier = 0.0
+tier_d_quality_bonus = 0.0
 
 [signal_tiers.KXBTC15M]
 allowed_sides = ["yes", "no"]
@@ -128,9 +128,9 @@ default_contracts = 1
 take_profit_cents = 8
 stop_loss_cents = 15
 fair_value_buffer_cents = 3
-time_exit_minutes_before_expiry = 5
-min_hold_edge = 0.02
-min_ev_to_hold_cents = 2
+time_exit_minutes_before_expiry = 2
+min_hold_edge = 0.0
+min_ev_to_hold_cents = 0
 exit_liquidity_floor = 0.0
 
 [backtest]

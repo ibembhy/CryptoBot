@@ -250,7 +250,7 @@ def generate_signal(
         quality_score -= stale_quote_flag * 1.5
         quality_score -= btc_micro_jump_flag * 1.0
         quality_score += tier_bonus
-        series_min_edge = float(profile["min_edge"]) if profile and "min_edge" in profile else config.min_edge
+        series_min_edge = config.min_edge
         if edge >= series_min_edge and conservative_probability >= config.min_confidence and expected_value_cents > 0:
             action = "buy_yes" if side == "yes" else "buy_no"
             tier_suffix = f" Tier {tier_label}." if tier_label else ""

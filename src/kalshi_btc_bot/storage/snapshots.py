@@ -4,7 +4,7 @@ import json
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -447,6 +447,20 @@ class SnapshotStore:
             }
             for row in rows
         ]
+
+    def prune_old_snapshots(self, *, retain_days: int = 30) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retain_days)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM market_snapshots
+                    WHERE observed_at < %(cutoff)s
+                      AND settlement_price IS NOT NULL
+                    """,
+                    {"cutoff": cutoff.isoformat()},
+                )
+                return int(cur.rowcount)
 
     def update_market_settlement(self, market_ticker: str, settlement_price: float) -> int:
         with self._connect() as conn:
